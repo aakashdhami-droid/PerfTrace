@@ -1,0 +1,24 @@
+# Environment and Secrets
+.env
+*.local
+*.log
+
+# Backend / Maven
+backend/target/
+backend/.mvn/wrapper/maven-wrapper.jar
+backend/*.iml
+backend/.idea/
+
+# Frontend / Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Database and portable tools data
+pgsql_data/
+*.pid
+
+# IDE and OS files
+.DS_Store
+Thumbs.db
+.vscode/

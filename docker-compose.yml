@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: perftrace-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${PERFTRACE_DB_NAME:-perftrace}
+      POSTGRES_USER: ${PERFTRACE_DB_USER:-perftrace}
+      POSTGRES_PASSWORD: ${PERFTRACE_DB_PASSWORD:-perftrace}
+    volumes:
+      - perftrace_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PERFTRACE_DB_USER:-perftrace} -d ${PERFTRACE_DB_NAME:-perftrace}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  perftrace_pgdata:
+    driver: local
