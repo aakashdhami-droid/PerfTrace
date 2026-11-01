@@ -48,13 +48,11 @@ public class TimeWindowAggregator {
             }
         }
 
-        // Filter out empty windows and compute aggregates
+        // Keep all windows to preserve original time boundaries and data gaps
         List<TimeWindow> validWindows = new ArrayList<>();
         for (TimeWindow window : windows) {
-            if (!window.getSamples().isEmpty()) {
-                window.computeAggregates(maxGapThresholdSeconds);
-                validWindows.add(window);
-            }
+            window.computeAggregates(maxGapThresholdSeconds);
+            validWindows.add(window);
         }
 
         return validWindows;

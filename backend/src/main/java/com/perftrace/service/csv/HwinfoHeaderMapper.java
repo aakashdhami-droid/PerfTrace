@@ -112,33 +112,41 @@ public class HwinfoHeaderMapper {
             String raw = cleanHeader(rawHeaders[i]);
             if (raw.isBlank()) continue;
 
+            String normalized = normalizeHeader(raw);
+
+            // Find the best matching field by longest alias (most specific) first.
+            NormalizedSensorField bestField = null;
+            int bestAliasLen = -1;
             for (Map.Entry<NormalizedSensorField, List<String>> entry : patterns.entrySet()) {
                 NormalizedSensorField field = entry.getKey();
-                if (columnMap.containsKey(field)) continue; // Keep first match
+                if (columnMap.containsKey(field)) continue;
 
                 for (String alias : entry.getValue()) {
-                    if (headerMatches(raw, alias)) {
-                        columnMap.put(field, i);
-                        break;
+                    String target = alias.toLowerCase(Locale.ROOT).trim().replaceAll("\\s+", " ");
+                    if (aliasMatches(normalized, target) && target.length() > bestAliasLen) {
+                        bestField = field;
+                        bestAliasLen = target.length();
                     }
                 }
+            }
+
+            if (bestField != null) {
+                columnMap.put(bestField, i);
             }
         }
 
         return columnMap;
     }
 
-    private boolean headerMatches(String raw, String alias) {
-        String normalized = raw.toLowerCase(Locale.ROOT);
-        String target = alias.toLowerCase(Locale.ROOT);
+    private String normalizeHeader(String raw) {
+        String lower = raw.toLowerCase(Locale.ROOT);
+        String withoutUnits = lower.replaceAll("\\[.*?\\]", " ").trim();
+        return withoutUnits.replaceAll("\\s+", " ");
+    }
 
-        // Exact match or contains without brackets/units
+    private boolean aliasMatches(String normalized, String target) {
         if (normalized.equals(target)) return true;
-        if (normalized.startsWith(target)) return true;
-
-        // Strip units like "[%]", "[°c]", "[mhz]", "[w]"
-        String withoutUnits = normalized.replaceAll("\\[.*?\\]", "").trim();
-        return withoutUnits.equals(target) || withoutUnits.startsWith(target);
+        return normalized.startsWith(target + " ");
     }
 
     public static String cleanHeader(String header) {

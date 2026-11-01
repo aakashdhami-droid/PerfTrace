@@ -44,7 +44,10 @@ public class TimeWindow {
     }
 
     public void computeAggregates(double maxGapThresholdSeconds) {
-        if (samples.isEmpty()) return;
+        if (samples.isEmpty()) {
+            this.hasDataGap = true;
+            return;
+        }
 
         // Check for data gaps between consecutive samples in this window
         for (int i = 1; i < samples.size(); i++) {

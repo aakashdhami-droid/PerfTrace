@@ -22,10 +22,9 @@ public class GpuBoundDetector {
         if (gpuLoad == null) return false;
         if (gpuLoad < GPU_LOAD_THRESHOLD) return false;
 
-        // If cpuMaxThread is available, check it's below 85%
-        if (cpuMaxThread != null && cpuMaxThread >= CPU_MAX_THREAD_THRESHOLD) {
-            return false;
-        }
+        // Require CPU headroom evidence; missing busiest-thread data means insufficient evidence.
+        if (cpuMaxThread == null) return false;
+        if (cpuMaxThread >= CPU_MAX_THREAD_THRESHOLD) return false;
 
         return true;
     }

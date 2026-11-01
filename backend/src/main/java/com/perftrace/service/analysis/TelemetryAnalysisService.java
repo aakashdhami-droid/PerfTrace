@@ -80,9 +80,11 @@ public class TelemetryAnalysisService {
             String evidence;
 
             // Insufficient data safeguard
-            if (window.getAvgCpuTotalLoad() == null && window.getAvgGpuLoad() == null) {
+            Double cpuTotal = window.getAvgCpuTotalLoad();
+            Double gpuLoad = window.getAvgGpuLoad();
+            if (cpuTotal == null || gpuLoad == null) {
                 classification = Classification.UNKNOWN;
-                evidence = "Insufficient data: Both CPU and GPU load readings were missing during this window.";
+                evidence = "Insufficient data: CPU total load and/or GPU load readings were missing during this window.";
             } else if (idleDetector.isIdle(window)) {
                 classification = Classification.IDLE;
                 evidence = idleDetector.buildEvidence(window);

@@ -21,11 +21,14 @@ public class JwtTokenProvider {
         @Value("${perftrace.jwt.secret:}") String secret,
         @Value("${perftrace.jwt.expiration-ms:86400000}") long expirationMs
     ) {
-        // Fallback default secret for development if env var not set (must be at least 256 bits)
-        String effectiveSecret = (secret == null || secret.isBlank())
-            ? "default-perftrace-jwt-secret-key-that-is-at-least-256-bits-long-for-hmac-sha256"
-            : secret;
-        this.key = Keys.hmacShaKeyFor(effectiveSecret.getBytes(StandardCharsets.UTF_8));
+        if (secret == null || secret.isBlank()) {
+            throw new IllegalStateException("perftrace.jwt.secret must be set and at least 32 characters");
+        }
+        byte[] keyBytes = secret.getBytes(StandardCharsets.UTF_8);
+        if (keyBytes.length < 32) {
+            throw new IllegalStateException("perftrace.jwt.secret must be at least 32 bytes (256 bits)");
+        }
+        this.key = Keys.hmacShaKeyFor(keyBytes);
         this.expirationMs = expirationMs;
     }
 

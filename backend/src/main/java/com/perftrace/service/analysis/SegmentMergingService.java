@@ -83,7 +83,9 @@ public class SegmentMergingService {
 
     private boolean canMerge(DetectedSegment segment, ClassifiedWindow cw) {
         if (segment.getClassification() != cw.getClassification()) return false;
-        // Throttle compatibility: Hard throttle flags must not merge with non-throttle periods
+        // Temporal adjacency required
+        if (Math.abs(segment.getEndOffsetSeconds() - cw.getWindow().getStartOffsetSeconds()) > 0.001) return false;
+        // Throttle compatibility
         boolean segmentThrottled = (segment.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG ||
                                     segment.getThrottleEvidence() == ThrottleEvidence.HEURISTIC_DETECTED);
         boolean windowThrottled = (cw.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG ||
@@ -164,14 +166,26 @@ public class SegmentMergingService {
                 DetectedSegment prev = smoothed.get(smoothed.size() - 1);
                 DetectedSegment next = segments.get(i + 1);
 
-                boolean throttleProtected = (curr.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG);
+                boolean currThrottled = (curr.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG ||
+                                        curr.getThrottleEvidence() == ThrottleEvidence.HEURISTIC_DETECTED);
+                boolean prevThrottled = (prev.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG ||
+                                        prev.getThrottleEvidence() == ThrottleEvidence.HEURISTIC_DETECTED);
+                boolean nextThrottled = (next.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG ||
+                                        next.getThrottleEvidence() == ThrottleEvidence.HEURISTIC_DETECTED);
 
-                if (!throttleProtected && prev.getClassification() == next.getClassification()) {
+                // Temporal adjacency between prev->curr and curr->next
+                boolean adjacent = Math.abs(prev.getEndOffsetSeconds() - curr.getStartOffsetSeconds()) < 0.001
+                    && Math.abs(curr.getEndOffsetSeconds() - next.getStartOffsetSeconds()) < 0.001;
+
+                if (!currThrottled && !prevThrottled && !nextThrottled
+                        && prev.getClassification() == next.getClassification()
+                        && adjacent
+                        && prev.getThrottleEvidence() == next.getThrottleEvidence()) {
                     // Absorb curr and next into prev
                     prev.setEndOffsetSeconds(next.getEndOffsetSeconds());
                     prev.setDurationSeconds(Math.round((prev.getEndOffsetSeconds() - prev.getStartOffsetSeconds()) * 100.0) / 100.0);
                     prev.setSampleCount(prev.getSampleCount() + curr.getSampleCount() + next.getSampleCount());
-                    i += 2; // skip curr and next
+                    i += 2;
                     continue;
                 }
             }
