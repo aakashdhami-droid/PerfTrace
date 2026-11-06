@@ -2,126 +2,205 @@ package com.perftrace.service.analysis;
 
 import com.perftrace.entity.TelemetrySample;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
- * Represents aggregated telemetry metrics over a discrete time window (typically 10 seconds).
- * Averages do NOT treat missing measurements as zero.
+ * Compact, aggregate-only representation of a telemetry window.
+ *
+ * <p>Deliberately does not retain the source {@link TelemetrySample} objects. The ingestion
+ * pipeline can therefore process arbitrarily large CSVs with memory proportional to the
+ * number of active generators (the window currently being filled and clock histograms), not
+ * to the number of uploaded rows.</p>
+ *
+ * <p>Clock averages are calculated from active-workload samples only. CPU and GPU activity
+ * are evaluated independently so that a GPU-bound game does not drag the CPU clock average
+ * down with otherwise-idle CPU samples.</p>
  */
 public class TimeWindow {
 
     private final double startOffsetSeconds;
-    private final double endOffsetSeconds;
-    private final List<TelemetrySample> samples = new ArrayList<>();
+    private double endOffsetSeconds;
 
-    // Aggregates
-    private Double avgCpuTotalLoad;
-    private Double avgCpuMaxThreadLoad;
-    private Double avgGpuLoad;
+    private int sampleCount = 0;
+    private Double firstSampleOffsetSeconds;
+    private Double lastSampleOffsetSeconds;
+    private double maxSampleDeltaSeconds = 0.0;
+    private boolean hasDataGap = false;
 
-    private Double avgCpuTempC;
-    private Double avgGpuTempC;
+    private double sumCpuTotalLoad = 0.0;
+    private int countCpuTotalLoad = 0;
+
+    private double sumCpuMaxThreadLoad = 0.0;
+    private int countCpuMaxThreadLoad = 0;
+
+    private double sumGpuLoad = 0.0;
+    private int countGpuLoad = 0;
+
+    private double sumCpuTempC = 0.0;
+    private int countCpuTempC = 0;
     private Double peakCpuTempC;
+
+    private double sumGpuTempC = 0.0;
+    private int countGpuTempC = 0;
     private Double peakGpuTempC;
 
-    private Double avgCpuClockMhz;
-    private Double avgGpuClockMhz;
+    /** Clocks are summed only for samples that prove active CPU/GPU work. */
+    private double sumActiveCpuClockMhz = 0.0;
+    private int countActiveCpuClockMhz = 0;
+
+    private double sumActiveGpuClockMhz = 0.0;
+    private int countActiveGpuClockMhz = 0;
 
     private int cpuHardwareThrottleCount = 0;
     private int gpuHardwareThrottleCount = 0;
     private int throttleFlagObservationCount = 0;
 
-    private boolean hasDataGap = false;
-
     public TimeWindow(double startOffsetSeconds, double endOffsetSeconds) {
         this.startOffsetSeconds = startOffsetSeconds;
-        this.endOffsetSeconds = endOffsetSeconds;
+        this.endOffsetSeconds = Math.max(startOffsetSeconds, endOffsetSeconds);
     }
 
     public void addSample(TelemetrySample sample) {
-        samples.add(sample);
+        if (sample == null) return;
+
+        double offset = Math.max(0.0, sample.getTimeOffsetSeconds());
+        if (firstSampleOffsetSeconds == null) {
+            firstSampleOffsetSeconds = offset;
+        } else {
+            maxSampleDeltaSeconds = Math.max(maxSampleDeltaSeconds, Math.abs(offset - lastSampleOffsetSeconds));
+        }
+        lastSampleOffsetSeconds = offset;
+        sampleCount++;
+
+        if (sample.getCpuTotalLoad() != null) {
+            sumCpuTotalLoad += sample.getCpuTotalLoad();
+            countCpuTotalLoad++;
+        }
+        if (sample.getCpuMaxThreadLoad() != null) {
+            sumCpuMaxThreadLoad += sample.getCpuMaxThreadLoad();
+            countCpuMaxThreadLoad++;
+        }
+        if (sample.getGpuLoad() != null) {
+            sumGpuLoad += sample.getGpuLoad();
+            countGpuLoad++;
+        }
+
+        if (sample.getCpuTempC() != null) {
+            sumCpuTempC += sample.getCpuTempC();
+            countCpuTempC++;
+            peakCpuTempC = peakCpuTempC == null
+                ? sample.getCpuTempC()
+                : Math.max(peakCpuTempC, sample.getCpuTempC());
+        }
+        if (sample.getGpuTempC() != null) {
+            sumGpuTempC += sample.getGpuTempC();
+            countGpuTempC++;
+            peakGpuTempC = peakGpuTempC == null
+                ? sample.getGpuTempC()
+                : Math.max(peakGpuTempC, sample.getGpuTempC());
+        }
+
+        if (sample.getCpuClockMhz() != null && isCpuActive(sample)) {
+            sumActiveCpuClockMhz += sample.getCpuClockMhz();
+            countActiveCpuClockMhz++;
+        }
+        if (sample.getGpuClockMhz() != null && isGpuActive(sample)) {
+            sumActiveGpuClockMhz += sample.getGpuClockMhz();
+            countActiveGpuClockMhz++;
+        }
+
+        if (sample.getCpuThrottleFlag() != null || sample.getGpuThrottleFlag() != null) {
+            throttleFlagObservationCount++;
+            if (Boolean.TRUE.equals(sample.getCpuThrottleFlag())) cpuHardwareThrottleCount++;
+            if (Boolean.TRUE.equals(sample.getGpuThrottleFlag())) gpuHardwareThrottleCount++;
+        }
     }
 
+    /**
+     * Combines another aggregate window into this one. Used by segment merging without
+     * retaining any raw samples.
+     */
+    public void addWindow(TimeWindow other) {
+        if (other == null) return;
+
+        if (firstSampleOffsetSeconds == null) {
+            firstSampleOffsetSeconds = other.firstSampleOffsetSeconds;
+        } else if (other.firstSampleOffsetSeconds != null) {
+            firstSampleOffsetSeconds = Math.min(firstSampleOffsetSeconds, other.firstSampleOffsetSeconds);
+        }
+        if (lastSampleOffsetSeconds == null) {
+            lastSampleOffsetSeconds = other.lastSampleOffsetSeconds;
+        } else if (other.lastSampleOffsetSeconds != null) {
+            lastSampleOffsetSeconds = Math.max(lastSampleOffsetSeconds, other.lastSampleOffsetSeconds);
+        }
+
+        sampleCount += other.sampleCount;
+        maxSampleDeltaSeconds = Math.max(maxSampleDeltaSeconds, other.maxSampleDeltaSeconds);
+        hasDataGap = hasDataGap || other.hasDataGap;
+
+        sumCpuTotalLoad += other.sumCpuTotalLoad;
+        countCpuTotalLoad += other.countCpuTotalLoad;
+        sumCpuMaxThreadLoad += other.sumCpuMaxThreadLoad;
+        countCpuMaxThreadLoad += other.countCpuMaxThreadLoad;
+        sumGpuLoad += other.sumGpuLoad;
+        countGpuLoad += other.countGpuLoad;
+
+        sumCpuTempC += other.sumCpuTempC;
+        countCpuTempC += other.countCpuTempC;
+        peakCpuTempC = maxNullable(peakCpuTempC, other.peakCpuTempC);
+
+        sumGpuTempC += other.sumGpuTempC;
+        countGpuTempC += other.countGpuTempC;
+        peakGpuTempC = maxNullable(peakGpuTempC, other.peakGpuTempC);
+
+        sumActiveCpuClockMhz += other.sumActiveCpuClockMhz;
+        countActiveCpuClockMhz += other.countActiveCpuClockMhz;
+        sumActiveGpuClockMhz += other.sumActiveGpuClockMhz;
+        countActiveGpuClockMhz += other.countActiveGpuClockMhz;
+
+        cpuHardwareThrottleCount += other.cpuHardwareThrottleCount;
+        gpuHardwareThrottleCount += other.gpuHardwareThrottleCount;
+        throttleFlagObservationCount += other.throttleFlagObservationCount;
+    }
+
+    /**
+     * Finalizes gap status. Kept for compatibility with the original public API; aggregate
+     * values are available immediately after {@link #addSample(TelemetrySample)}.
+     */
     public void computeAggregates(double maxGapThresholdSeconds) {
-        if (samples.isEmpty()) {
-            this.hasDataGap = true;
+        if (sampleCount == 0) {
+            hasDataGap = true;
             return;
         }
-
-        // Check for data gaps between consecutive samples in this window
-        for (int i = 1; i < samples.size(); i++) {
-            double delta = samples.get(i).getTimeOffsetSeconds() - samples.get(i - 1).getTimeOffsetSeconds();
-            if (delta > maxGapThresholdSeconds) {
-                this.hasDataGap = true;
-                break;
-            }
+        if (maxSampleDeltaSeconds > maxGapThresholdSeconds) {
+            hasDataGap = true;
         }
+    }
 
-        double sumCpuTotal = 0; int countCpuTotal = 0;
-        double sumCpuThread = 0; int countCpuThread = 0;
-        double sumGpuLoad = 0; int countGpuLoad = 0;
+    /**
+     * Clips the window's end to the last observed timestamp. The streaming aggregator
+     * cannot know the final sample time while it is filling the window, so the final
+     * window is trimmed when the recording ends.
+     */
+    public void clipEndTo(double endOffsetSeconds) {
+        this.endOffsetSeconds = Math.max(this.startOffsetSeconds, endOffsetSeconds);
+    }
 
-        double sumCpuTemp = 0; int countCpuTemp = 0;
-        double sumGpuTemp = 0; int countGpuTemp = 0;
-        Double maxCpuTemp = null;
-        Double maxGpuTemp = null;
+    private boolean isCpuActive(TelemetrySample sample) {
+        return (sample.getCpuTotalLoad() != null && sample.getCpuTotalLoad() >= IdleDetector.CPU_IDLE_THRESHOLD)
+            || (sample.getCpuMaxThreadLoad() != null && sample.getCpuMaxThreadLoad() >= IdleDetector.CPU_IDLE_THRESHOLD);
+    }
 
-        double sumCpuClock = 0; int countCpuClock = 0;
-        double sumGpuClock = 0; int countGpuClock = 0;
+    private boolean isGpuActive(TelemetrySample sample) {
+        return sample.getGpuLoad() != null && sample.getGpuLoad() >= IdleDetector.GPU_IDLE_THRESHOLD;
+    }
 
-        for (TelemetrySample s : samples) {
-            if (s.getCpuTotalLoad() != null) {
-                sumCpuTotal += s.getCpuTotalLoad();
-                countCpuTotal++;
-            }
-            if (s.getCpuMaxThreadLoad() != null) {
-                sumCpuThread += s.getCpuMaxThreadLoad();
-                countCpuThread++;
-            }
-            if (s.getGpuLoad() != null) {
-                sumGpuLoad += s.getGpuLoad();
-                countGpuLoad++;
-            }
+    private static Double maxNullable(Double a, Double b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return Math.max(a, b);
+    }
 
-            if (s.getCpuTempC() != null) {
-                sumCpuTemp += s.getCpuTempC();
-                countCpuTemp++;
-                maxCpuTemp = (maxCpuTemp == null) ? s.getCpuTempC() : Math.max(maxCpuTemp, s.getCpuTempC());
-            }
-            if (s.getGpuTempC() != null) {
-                sumGpuTemp += s.getGpuTempC();
-                countGpuTemp++;
-                maxGpuTemp = (maxGpuTemp == null) ? s.getGpuTempC() : Math.max(maxGpuTemp, s.getGpuTempC());
-            }
-
-            if (s.getCpuClockMhz() != null) {
-                sumCpuClock += s.getCpuClockMhz();
-                countCpuClock++;
-            }
-            if (s.getGpuClockMhz() != null) {
-                sumGpuClock += s.getGpuClockMhz();
-                countGpuClock++;
-            }
-
-            if (s.getCpuThrottleFlag() != null || s.getGpuThrottleFlag() != null) {
-                throttleFlagObservationCount++;
-                if (Boolean.TRUE.equals(s.getCpuThrottleFlag())) cpuHardwareThrottleCount++;
-                if (Boolean.TRUE.equals(s.getGpuThrottleFlag())) gpuHardwareThrottleCount++;
-            }
-        }
-
-        if (countCpuTotal > 0) avgCpuTotalLoad = round(sumCpuTotal / countCpuTotal);
-        if (countCpuThread > 0) avgCpuMaxThreadLoad = round(sumCpuThread / countCpuThread);
-        if (countGpuLoad > 0) avgGpuLoad = round(sumGpuLoad / countGpuLoad);
-
-        if (countCpuTemp > 0) avgCpuTempC = round(sumCpuTemp / countCpuTemp);
-        if (countGpuTemp > 0) avgGpuTempC = round(sumGpuTemp / countGpuTemp);
-        peakCpuTempC = maxCpuTemp;
-        peakGpuTempC = maxGpuTemp;
-
-        if (countCpuClock > 0) avgCpuClockMhz = round(sumCpuClock / countCpuClock);
-        if (countGpuClock > 0) avgGpuClockMhz = round(sumGpuClock / countGpuClock);
+    private double average(double sum, int count) {
+        return count == 0 ? 0.0 : round(sum / count);
     }
 
     private double round(double val) {
@@ -131,20 +210,46 @@ public class TimeWindow {
     public double getStartOffsetSeconds() { return startOffsetSeconds; }
     public double getEndOffsetSeconds() { return endOffsetSeconds; }
     public double getDurationSeconds() { return endOffsetSeconds - startOffsetSeconds; }
-    public List<TelemetrySample> getSamples() { return samples; }
-    public int getSampleCount() { return samples.size(); }
+    public int getSampleCount() { return sampleCount; }
 
-    public Double getAvgCpuTotalLoad() { return avgCpuTotalLoad; }
-    public Double getAvgCpuMaxThreadLoad() { return avgCpuMaxThreadLoad; }
-    public Double getAvgGpuLoad() { return avgGpuLoad; }
+    public Double getFirstSampleOffsetSeconds() { return firstSampleOffsetSeconds; }
+    public Double getLastSampleOffsetSeconds() { return lastSampleOffsetSeconds; }
 
-    public Double getAvgCpuTempC() { return avgCpuTempC; }
-    public Double getAvgGpuTempC() { return avgGpuTempC; }
+    public Double getAvgCpuTotalLoad() {
+        return countCpuTotalLoad == 0 ? null : average(sumCpuTotalLoad, countCpuTotalLoad);
+    }
+
+    public Double getAvgCpuMaxThreadLoad() {
+        return countCpuMaxThreadLoad == 0 ? null : average(sumCpuMaxThreadLoad, countCpuMaxThreadLoad);
+    }
+
+    public Double getAvgGpuLoad() {
+        return countGpuLoad == 0 ? null : average(sumGpuLoad, countGpuLoad);
+    }
+
+    public Double getAvgCpuTempC() {
+        return countCpuTempC == 0 ? null : average(sumCpuTempC, countCpuTempC);
+    }
+
+    public Double getAvgGpuTempC() {
+        return countGpuTempC == 0 ? null : average(sumGpuTempC, countGpuTempC);
+    }
+
     public Double getPeakCpuTempC() { return peakCpuTempC; }
     public Double getPeakGpuTempC() { return peakGpuTempC; }
 
-    public Double getAvgCpuClockMhz() { return avgCpuClockMhz; }
-    public Double getAvgGpuClockMhz() { return avgGpuClockMhz; }
+    /** Average of valid clocks from samples with independently proven CPU activity. */
+    public Double getAvgCpuClockMhz() {
+        return countActiveCpuClockMhz == 0 ? null : average(sumActiveCpuClockMhz, countActiveCpuClockMhz);
+    }
+
+    /** Average of valid clocks from samples with independently proven GPU activity. */
+    public Double getAvgGpuClockMhz() {
+        return countActiveGpuClockMhz == 0 ? null : average(sumActiveGpuClockMhz, countActiveGpuClockMhz);
+    }
+
+    public int getActiveCpuClockSampleCount() { return countActiveCpuClockMhz; }
+    public int getActiveGpuClockSampleCount() { return countActiveGpuClockMhz; }
 
     public int getCpuHardwareThrottleCount() { return cpuHardwareThrottleCount; }
     public int getGpuHardwareThrottleCount() { return gpuHardwareThrottleCount; }

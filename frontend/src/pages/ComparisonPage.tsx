@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AnalysisRun, RunComparison } from '../types';
+import { AnalysisRun, RunComparison, formatWorkloadType } from '../types';
 import { api } from '../services/api';
 import { DiagnosticDisclaimer } from '../components/DiagnosticDisclaimer';
 import {
@@ -126,7 +126,7 @@ export const ComparisonPage: React.FC<Props> = ({
               <option value="">Select Run A...</option>
               {runs.map((r) => (
                 <option key={r.id} value={r.id}>
-                  #{r.id} — {r.fileName} ({r.description || 'No description'})
+                  #{r.id} — {r.fileName} · {formatWorkloadType(r.workloadType)} ({r.description || 'No description'})
                 </option>
               ))}
             </select>
@@ -150,7 +150,7 @@ export const ComparisonPage: React.FC<Props> = ({
               <option value="">Select Run B...</option>
               {runs.map((r) => (
                 <option key={r.id} value={r.id}>
-                  #{r.id} — {r.fileName} ({r.description || 'No description'})
+                  #{r.id} — {r.fileName} · {formatWorkloadType(r.workloadType)} ({r.description || 'No description'})
                 </option>
               ))}
             </select>
@@ -192,10 +192,13 @@ export const ComparisonPage: React.FC<Props> = ({
               <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', marginTop: '4px' }}>
                 {comparison.runA.description || 'No description provided'}
               </p>
+              <p style={{ fontSize: '0.75rem', color: 'var(--accent-cyan)', marginTop: '4px' }}>
+                Declared workload: {formatWorkloadType(comparison.runA.workloadType)}
+              </p>
               <div style={{ display: 'flex', gap: '16px', marginTop: '12px', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
                 <span>Duration: <strong>{comparison.runA.totalDurationSeconds?.toFixed(0)}s</strong></span>
-                <span>CPU-Bound: <strong>{comparison.runA.cpuBoundActivePercent ?? 0}%</strong></span>
-                <span>GPU-Bound: <strong>{comparison.runA.gpuBoundActivePercent ?? 0}%</strong></span>
+                <span>CPU-Bound: <strong>{comparison.runA.cpuBoundActivePercent != null ? `${comparison.runA.cpuBoundActivePercent}%` : 'N/A'}</strong></span>
+                <span>GPU-Bound: <strong>{comparison.runA.gpuBoundActivePercent != null ? `${comparison.runA.gpuBoundActivePercent}%` : 'N/A'}</strong></span>
               </div>
             </div>
 
@@ -207,10 +210,13 @@ export const ComparisonPage: React.FC<Props> = ({
               <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', marginTop: '4px' }}>
                 {comparison.runB.description || 'No description provided'}
               </p>
+              <p style={{ fontSize: '0.75rem', color: 'var(--accent-cyan)', marginTop: '4px' }}>
+                Declared workload: {formatWorkloadType(comparison.runB.workloadType)}
+              </p>
               <div style={{ display: 'flex', gap: '16px', marginTop: '12px', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
                 <span>Duration: <strong>{comparison.runB.totalDurationSeconds?.toFixed(0)}s</strong></span>
-                <span>CPU-Bound: <strong>{comparison.runB.cpuBoundActivePercent ?? 0}%</strong></span>
-                <span>GPU-Bound: <strong>{comparison.runB.gpuBoundActivePercent ?? 0}%</strong></span>
+                <span>CPU-Bound: <strong>{comparison.runB.cpuBoundActivePercent != null ? `${comparison.runB.cpuBoundActivePercent}%` : 'N/A'}</strong></span>
+                <span>GPU-Bound: <strong>{comparison.runB.gpuBoundActivePercent != null ? `${comparison.runB.gpuBoundActivePercent}%` : 'N/A'}</strong></span>
               </div>
             </div>
           </div>

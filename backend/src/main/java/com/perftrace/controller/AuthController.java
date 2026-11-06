@@ -5,13 +5,14 @@ import com.perftrace.dto.LoginRequest;
 import com.perftrace.dto.RegisterRequest;
 import com.perftrace.dto.UserDto;
 import com.perftrace.entity.User;
-import com.perftrace.exception.InvalidFileException;
+import com.perftrace.exception.DuplicateResourceException;
 import com.perftrace.repository.UserRepository;
 import com.perftrace.security.CustomUserDetailsService;
 import com.perftrace.security.JwtTokenProvider;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -51,17 +52,24 @@ public class AuthController {
     @Operation(summary = "Register a new user account")
     public ResponseEntity<AuthResponse> register(@Valid @RequestBody RegisterRequest request) {
         if (userRepository.existsByUsername(request.getUsername())) {
-            throw new InvalidFileException("Username '" + request.getUsername() + "' is already taken.");
+            throw new DuplicateResourceException("Username '" + request.getUsername() + "' is already taken.");
         }
         if (userRepository.existsByEmail(request.getEmail())) {
-            throw new InvalidFileException("Email '" + request.getEmail() + "' is already registered.");
+            throw new DuplicateResourceException("Email '" + request.getEmail() + "' is already registered.");
         }
 
         User user = new User();
         user.setUsername(request.getUsername());
         user.setEmail(request.getEmail());
         user.setPasswordHash(passwordEncoder.encode(request.getPassword()));
-        user = userRepository.save(user);
+
+        try {
+            user = userRepository.save(user);
+        } catch (DataIntegrityViolationException ex) {
+            // Two concurrent registrations can both pass the existence checks. The unique
+            // database constraints are the authority, so translate the race into a 409.
+            throw new DuplicateResourceException("Username or email is already registered.");
+        }
 
         String token = tokenProvider.generateToken(user.getId(), user.getUsername());
         return ResponseEntity.status(HttpStatus.CREATED)

@@ -42,10 +42,11 @@ public class AnalysisRunController {
     public ResponseEntity<RunUploadResponse> upload(
         @RequestParam("file") MultipartFile file,
         @RequestParam(value = "description", required = false) String description,
+        @RequestParam(value = "workloadType", required = false) String workloadType,
         Principal principal
     ) {
         User user = userDetailsService.loadUserEntity(principal.getName());
-        RunUploadResponse response = analysisRunService.uploadAndProcess(file, description, user);
+        RunUploadResponse response = analysisRunService.uploadAndProcess(file, description, workloadType, user);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
@@ -57,7 +58,9 @@ public class AnalysisRunController {
         Principal principal
     ) {
         User user = userDetailsService.loadUserEntity(principal.getName());
-        Page<AnalysisRunDto> runs = analysisRunService.getUserRuns(user.getId(), PageRequest.of(page, size));
+        int safePage = Math.max(0, page);
+        int safeSize = Math.min(100, Math.max(1, size));
+        Page<AnalysisRunDto> runs = analysisRunService.getUserRuns(user.getId(), PageRequest.of(safePage, safeSize));
         return ResponseEntity.ok(runs);
     }
 

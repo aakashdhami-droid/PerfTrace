@@ -1,5 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { AnalysisRun } from '../types';
+import {
+  AnalysisRun,
+  WorkloadType,
+  WORKLOAD_TYPE_OPTIONS,
+  formatWorkloadType,
+} from '../types';
 import { api } from '../services/api';
 import { ClassificationBadge } from '../components/ClassificationBadge';
 import { MetricCard } from '../components/MetricCard';
@@ -36,6 +41,7 @@ export const DashboardPage: React.FC<Props> = ({
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [description, setDescription] = useState('');
+  const [workloadType, setWorkloadType] = useState<WorkloadType>('UNSPECIFIED');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadMessage, setUploadMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -78,10 +84,11 @@ export const DashboardPage: React.FC<Props> = ({
     setUploadMessage(null);
 
     try {
-      const res = await api.uploadRun(selectedFile, description);
+      const res = await api.uploadRun(selectedFile, description, workloadType);
       setUploadMessage({ type: 'success', text: `Upload successful! ${res.validRows || 0} samples analyzed.` });
       setSelectedFile(null);
       setDescription('');
+      setWorkloadType('UNSPECIFIED');
       loadRuns();
     } catch (err: any) {
       setUploadMessage({ type: 'error', text: err.message || 'CSV ingestion failed.' });
@@ -157,7 +164,7 @@ export const DashboardPage: React.FC<Props> = ({
     const demoFile = new File([blob], fileName, { type: 'text/csv' });
 
     try {
-      const res = await api.uploadRun(demoFile, desc);
+      const res = await api.uploadRun(demoFile, desc, 'SYNTHETIC_BENCHMARK');
       setUploadMessage({ type: 'success', text: `Demo loaded! Synthetic run #${res.runId} analyzed successfully.` });
       loadRuns();
     } catch (err: any) {
@@ -298,6 +305,25 @@ export const DashboardPage: React.FC<Props> = ({
                 className="input-field"
               />
             </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                Declared Workload Type (Optional)
+              </label>
+              <select
+                value={workloadType}
+                onChange={(e) => setWorkloadType(e.target.value as WorkloadType)}
+                className="input-field"
+                style={{ cursor: 'pointer' }}
+              >
+                {WORKLOAD_TYPE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <p style={{ fontSize: '0.6875rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                Supplied by you. PerfTrace does not infer workload type from sensor readings.
+              </p>
+            </div>
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '6px' }}>
@@ -366,8 +392,10 @@ export const DashboardPage: React.FC<Props> = ({
               <tbody>
                 {runs.map((run) => {
                   const isCompleted = run.status === 'COMPLETED';
-                  const durSec = run.totalDurationSeconds || 0;
-                  const durFormatted = `${Math.floor(durSec / 60)}m ${Math.round(durSec % 60)}s`;
+                  const durSec = Math.max(0, Math.round(run.totalDurationSeconds ?? 0));
+                  const durFormatted = durSec < 60
+                    ? `${durSec}s`
+                    : `${Math.floor(durSec / 60)}m ${durSec % 60}s`;
 
                   return (
                     <tr
@@ -388,6 +416,11 @@ export const DashboardPage: React.FC<Props> = ({
                         {run.description && (
                           <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                             {run.description}
+                          </div>
+                        )}
+                        {run.workloadType && run.workloadType !== 'UNSPECIFIED' && (
+                          <div style={{ fontSize: '0.6875rem', color: 'var(--accent-cyan)', marginTop: '3px' }}>
+                            {formatWorkloadType(run.workloadType)}
                           </div>
                         )}
                       </td>
@@ -413,15 +446,15 @@ export const DashboardPage: React.FC<Props> = ({
                         {isCompleted ? (
                           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                             <span style={{ color: 'var(--cpu-color)', fontSize: '0.75rem', fontWeight: 600 }}>
-                              CPU: {run.cpuBoundActivePercent ?? 0}%
+                              CPU: {run.cpuBoundActivePercent != null ? `${run.cpuBoundActivePercent}%` : 'N/A'}
                             </span>
                             <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>|</span>
                             <span style={{ color: 'var(--gpu-color)', fontSize: '0.75rem', fontWeight: 600 }}>
-                              GPU: {run.gpuBoundActivePercent ?? 0}%
+                              GPU: {run.gpuBoundActivePercent != null ? `${run.gpuBoundActivePercent}%` : 'N/A'}
                             </span>
                             <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>|</span>
                             <span style={{ color: 'var(--balanced-color)', fontSize: '0.75rem', fontWeight: 600 }}>
-                              Bal: {run.balancedActivePercent ?? 0}%
+                              Bal: {run.balancedActivePercent != null ? `${run.balancedActivePercent}%` : 'N/A'}
                             </span>
                           </div>
                         ) : (
@@ -445,9 +478,9 @@ export const DashboardPage: React.FC<Props> = ({
                       </td>
 
                       <td style={{ padding: '12px 14px', color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
-                        {isCompleted && (run.peakCpuTempC || run.peakGpuTempC) ? (
+                        {isCompleted && (run.peakCpuTempC != null || run.peakGpuTempC != null) ? (
                           <span>
-                            CPU: {run.peakCpuTempC ? `${run.peakCpuTempC}°C` : 'N/A'}, GPU: {run.peakGpuTempC ? `${run.peakGpuTempC}°C` : 'N/A'}
+                            CPU: {run.peakCpuTempC != null ? `${run.peakCpuTempC}°C` : 'N/A'}, GPU: {run.peakGpuTempC != null ? `${run.peakGpuTempC}°C` : 'N/A'}
                           </span>
                         ) : (
                           '—'

@@ -13,6 +13,15 @@ import java.util.List;
 @Service
 public class TelemetryAnalysisService {
 
+    /**
+     * Preliminary baseline uses a high percentile so sustained throttling cannot make the
+     * baseline collapse to the throttled clock and hide its own regression.
+     */
+    private static final double PRELIMINARY_BASELINE_PERCENTILE = 0.95;
+
+    /** Final baseline is the P90 of active windows that survived throttling screening. */
+    private static final double FINAL_BASELINE_PERCENTILE = 0.90;
+
     private final TimeWindowAggregator windowAggregator;
     private final CpuBoundDetector cpuBoundDetector;
     private final GpuBoundDetector gpuBoundDetector;
@@ -50,38 +59,76 @@ public class TelemetryAnalysisService {
     }
 
     /**
-     * Executes the complete analysis pipeline on parsed telemetry samples and populates run summaries.
+     * Executes the complete analysis pipeline on parsed telemetry samples. Retained for
+     * unit tests and small callers; uploads use the streaming window path below so no raw
+     * sample list is ever retained.
      */
     public AnalysisResult analyze(AnalysisRun run, List<TelemetrySample> samples) {
+        if (samples == null || samples.isEmpty()) {
+            return new AnalysisResult(List.of(), List.of("No samples available to analyze."));
+        }
+        return analyzeWindows(run, windowAggregator.aggregate(samples));
+    }
+
+    /**
+     * Executes classification, thermal-baseline correction, segment merging and run-summary
+     * population from aggregate windows only.
+     */
+    public AnalysisResult analyzeWindows(AnalysisRun run, List<TimeWindow> windows) {
         List<String> warnings = new ArrayList<>();
 
-        if (samples.isEmpty()) {
+        if (windows == null || windows.isEmpty()) {
             return new AnalysisResult(List.of(), List.of("No samples available to analyze."));
         }
 
-        // Step 1: Divide into 10s windows
-        List<TimeWindow> windows = windowAggregator.aggregate(samples);
-
-        // Check for data gaps in windows
-        long gapCount = windows.stream().filter(TimeWindow::isHasDataGap).count();
-        if (gapCount > 0) {
-            warnings.add("Detected " + gapCount + " telemetry sampling gaps (>15s pause between consecutive logs).");
+        long emptyWindows = windows.stream().filter(w -> w.getSampleCount() == 0).count();
+        if (emptyWindows > 0) {
+            warnings.add("Detected " + emptyWindows + " time window(s) without telemetry (sampling gaps).");
         }
 
-        // Step 2: Calculate initial baseline clocks across non-idle windows
-        Double baselineCpuClock = computeBaselineClock(windows, true);
-        Double baselineGpuClock = computeBaselineClock(windows, false);
+        boolean hasThreadEvidence = windows.stream().anyMatch(w -> w.getAvgCpuMaxThreadLoad() != null);
+        if (!hasThreadEvidence) {
+            warnings.add("Busiest CPU thread load was unavailable. Windows that cannot be distinguished " +
+                "between balanced and thread-limited are reported as UNKNOWN.");
+        }
 
-        // Step 3: Classify each window and detect throttling
-        List<SegmentMergingService.ClassifiedWindow> classifiedWindows = new ArrayList<>();
+        // Step 1: Preliminary high-percentile baseline, used only to identify windows that
+        // are likely already throttled. Those windows are then excluded from the final
+        // baseline so a long throttled run cannot lower its own reference clock.
+        ClockBaselines preliminary = computeBaselines(windows, PRELIMINARY_BASELINE_PERCENTILE, null);
+
+        int excludedFromBaseline = 0;
+        List<TimeWindow> eligible = new ArrayList<>(windows.size());
+        for (TimeWindow window : windows) {
+            if (window.getSampleCount() == 0 || idleDetector.isIdle(window) || window.hasHardwareThrottle()) {
+                continue;
+            }
+            ThermalThrottleDetector.ThrottleResult preliminaryThrottle =
+                thermalThrottleDetector.detect(window, preliminary.cpuClockMhz(), preliminary.gpuClockMhz());
+            if (preliminaryThrottle.evidence() == ThrottleEvidence.HEURISTIC_DETECTED) {
+                excludedFromBaseline++;
+            } else {
+                eligible.add(window);
+            }
+        }
+
+        ClockBaselines finalBaselines = computeBaselines(eligible, FINAL_BASELINE_PERCENTILE, preliminary);
+        if (excludedFromBaseline > 0) {
+            warnings.add(excludedFromBaseline + " active window(s) were excluded from the thermal clock baseline " +
+                "because their clocks were already depressed at high temperature.");
+        }
+
+        // Step 2: Classify each window and apply final thermal detection.
+        List<SegmentMergingService.ClassifiedWindow> classifiedWindows = new ArrayList<>(windows.size());
 
         for (TimeWindow window : windows) {
             Classification classification;
             String evidence;
 
-            // Insufficient data safeguard
             Double cpuTotal = window.getAvgCpuTotalLoad();
             Double gpuLoad = window.getAvgGpuLoad();
+            Double cpuMaxThread = window.getAvgCpuMaxThreadLoad();
+
             if (cpuTotal == null || gpuLoad == null) {
                 classification = Classification.UNKNOWN;
                 evidence = "Insufficient data: CPU total load and/or GPU load readings were missing during this window.";
@@ -94,19 +141,25 @@ public class TelemetryAnalysisService {
             } else if (gpuBoundDetector.isGpuBound(window)) {
                 classification = Classification.GPU_BOUND;
                 evidence = gpuBoundDetector.buildEvidence(window);
+            } else if (cpuMaxThread == null) {
+                // GPU-bound requires proof of CPU headroom. Without the busiest-thread reading
+                // we cannot distinguish "balanced" from a single-thread CPU limitation.
+                classification = Classification.UNKNOWN;
+                evidence = "Insufficient data: busiest CPU thread load is required to distinguish a balanced " +
+                    "workload from a single-thread CPU limitation.";
             } else {
-                // Balanced / Other: Active workload where neither CPU nor GPU hit our specific bottleneck heuristic
+                // Balanced / Other: Active workload where neither CPU nor GPU hit our specific bottleneck heuristic.
                 classification = Classification.BALANCED;
                 evidence = String.format(
-                    "Balanced/Other: Active workload (CPU total: %.1f%%, GPU: %.1f%%) where no single resource " +
-                    "crossed limitation thresholds. Note: This indicates balanced utilization, not proven optimal execution.",
-                    window.getAvgCpuTotalLoad() != null ? window.getAvgCpuTotalLoad() : 0.0,
-                    window.getAvgGpuLoad() != null ? window.getAvgGpuLoad() : 0.0
+                    "Balanced/Other: Active workload (CPU total: %.1f%%, GPU: %.1f%%, busiest thread: %.1f%%) " +
+                    "where no single resource crossed limitation thresholds. Note: This indicates balanced " +
+                    "utilization, not proven optimal execution.",
+                    cpuTotal, gpuLoad, cpuMaxThread
                 );
             }
 
             ThermalThrottleDetector.ThrottleResult throttle =
-                thermalThrottleDetector.detect(window, baselineCpuClock, baselineGpuClock);
+                thermalThrottleDetector.detect(window, finalBaselines.cpuClockMhz(), finalBaselines.gpuClockMhz());
 
             classifiedWindows.add(new SegmentMergingService.ClassifiedWindow(
                 window,
@@ -116,27 +169,52 @@ public class TelemetryAnalysisService {
             ));
         }
 
-        // Step 4: Merge windows into segments
+        // Step 3: Merge windows into segments.
         List<DetectedSegment> segments = segmentMergingService.merge(classifiedWindows);
         for (DetectedSegment seg : segments) {
             seg.setRun(run);
         }
 
-        // Step 5: Populate Run-level metrics
-        populateRunSummary(run, windows, segments, samples);
-
-        if (run.getDataQualityWarnings() != null && !run.getDataQualityWarnings().isBlank()) {
-            warnings.add(run.getDataQualityWarnings());
-        }
+        // Step 4: Populate run-level metrics from aggregate windows.
+        populateRunSummary(run, windows, segments);
 
         return new AnalysisResult(segments, warnings);
+    }
+
+    /**
+     * Computes a percentile baseline from active, non-hardware-throttled windows using a
+     * fixed-size histogram. When {@code fallback} is supplied, empty histograms inherit its
+     * values rather than leaving throttling detection without a reference.
+     */
+    private ClockBaselines computeBaselines(
+        List<TimeWindow> windows,
+        double percentile,
+        ClockBaselines fallback
+    ) {
+        BoundedClockHistogram cpu = new BoundedClockHistogram();
+        BoundedClockHistogram gpu = new BoundedClockHistogram();
+
+        for (TimeWindow window : windows) {
+            if (window.getSampleCount() == 0 || idleDetector.isIdle(window) || window.hasHardwareThrottle()) {
+                continue;
+            }
+            cpu.add(window.getAvgCpuClockMhz());
+            gpu.add(window.getAvgGpuClockMhz());
+        }
+
+        Double cpuBaseline = cpu.percentile(percentile);
+        Double gpuBaseline = gpu.percentile(percentile);
+        if (fallback != null) {
+            if (cpuBaseline == null) cpuBaseline = fallback.cpuClockMhz();
+            if (gpuBaseline == null) gpuBaseline = fallback.gpuClockMhz();
+        }
+        return new ClockBaselines(cpuBaseline, gpuBaseline);
     }
 
     private void populateRunSummary(
         AnalysisRun run,
         List<TimeWindow> windows,
-        List<DetectedSegment> segments,
-        List<TelemetrySample> samples
+        List<DetectedSegment> segments
     ) {
         double cpuBoundSec = 0;
         double gpuBoundSec = 0;
@@ -174,30 +252,36 @@ public class TelemetryAnalysisService {
         run.setHeuristicThrottleSeconds(round(heuristicThrottleSec));
         run.setThrottleDurationSeconds(round(hardwareThrottleSec + heuristicThrottleSec));
 
-        double totalDur = samples.isEmpty() ? 0.0 : samples.get(samples.size() - 1).getTimeOffsetSeconds();
+        double totalDur = windows.get(windows.size() - 1).getEndOffsetSeconds();
         run.setTotalDurationSeconds(round(totalDur));
-        run.setValidDataDurationSeconds(round(cpuBoundSec + gpuBoundSec + balancedSec + idleSec + unknownSec));
 
-        // Peak temperatures and average sustained clocks
+        // "Valid data duration" excludes empty gap windows; they carry no measurements.
+        double validDur = windows.stream()
+            .filter(w -> w.getSampleCount() > 0)
+            .mapToDouble(TimeWindow::getDurationSeconds)
+            .sum();
+        run.setValidDataDurationSeconds(round(validDur));
+
+        // Peak temperatures and active-workload clock averages. Weighting each window's
+        // average by its active clock sample count keeps idle periods from diluting clocks.
         Double peakCpu = null;
         Double peakGpu = null;
         double sumCpuClock = 0; int countCpuClock = 0;
         double sumGpuClock = 0; int countGpuClock = 0;
 
-        for (TelemetrySample s : samples) {
-            if (s.getCpuTempC() != null) {
-                peakCpu = (peakCpu == null) ? s.getCpuTempC() : Math.max(peakCpu, s.getCpuTempC());
+        for (TimeWindow window : windows) {
+            peakCpu = maxNullable(peakCpu, window.getPeakCpuTempC());
+            peakGpu = maxNullable(peakGpu, window.getPeakGpuTempC());
+
+            Double cpuClock = window.getAvgCpuClockMhz();
+            if (cpuClock != null) {
+                sumCpuClock += cpuClock * window.getActiveCpuClockSampleCount();
+                countCpuClock += window.getActiveCpuClockSampleCount();
             }
-            if (s.getGpuTempC() != null) {
-                peakGpu = (peakGpu == null) ? s.getGpuTempC() : Math.max(peakGpu, s.getGpuTempC());
-            }
-            if (s.getCpuClockMhz() != null && s.getCpuClockMhz() > 500) {
-                sumCpuClock += s.getCpuClockMhz();
-                countCpuClock++;
-            }
-            if (s.getGpuClockMhz() != null && s.getGpuClockMhz() > 200) {
-                sumGpuClock += s.getGpuClockMhz();
-                countGpuClock++;
+            Double gpuClock = window.getAvgGpuClockMhz();
+            if (gpuClock != null) {
+                sumGpuClock += gpuClock * window.getActiveGpuClockSampleCount();
+                countGpuClock += window.getActiveGpuClockSampleCount();
             }
         }
 
@@ -207,22 +291,15 @@ public class TelemetryAnalysisService {
         if (countGpuClock > 0) run.setAvgGpuClockMhz(round(sumGpuClock / countGpuClock));
     }
 
-    private Double computeBaselineClock(List<TimeWindow> windows, boolean cpu) {
-        double sum = 0;
-        int count = 0;
-        for (TimeWindow w : windows) {
-            if (!idleDetector.isIdle(w)) {
-                Double clk = cpu ? w.getAvgCpuClockMhz() : w.getAvgGpuClockMhz();
-                if (clk != null) {
-                    sum += clk;
-                    count++;
-                }
-            }
-        }
-        return count > 0 ? (sum / count) : null;
+    private static Double maxNullable(Double a, Double b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return Math.max(a, b);
     }
 
     private double round(double v) {
         return Math.round(v * 10.0) / 10.0;
     }
+
+    private record ClockBaselines(Double cpuClockMhz, Double gpuClockMhz) {}
 }

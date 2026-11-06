@@ -27,7 +27,7 @@ export const DiagnosticDisclaimer: React.FC = () => {
           <div style={{ padding: '10px 12px', background: 'rgba(0, 0, 0, 0.2)', borderRadius: '6px' }}>
             <span style={{ color: 'var(--cpu-color)', fontWeight: 600 }}>CPU-Limited:</span>
             <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-              GPU load &lt; 90% while single thread or total CPU &gt; 90%. Suggests the GPU was ready to render but waiting on game logic, draw submission, or CPU execution.
+              GPU load &lt; 90% while single thread or total CPU ≥ 90%. Suggests the GPU was ready to render but waiting on game logic, draw submission, or CPU execution.
             </p>
           </div>
 
@@ -41,7 +41,7 @@ export const DiagnosticDisclaimer: React.FC = () => {
           <div style={{ padding: '10px 12px', background: 'rgba(0, 0, 0, 0.2)', borderRadius: '6px' }}>
             <span style={{ color: 'var(--balanced-color)', fontWeight: 600 }}>Balanced / Other:</span>
             <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-              Active load where neither threshold was crossed. Does <em>not</em> prove optimal efficiency, but confirms no single resource bottleneck rule was triggered.
+              Active load where neither threshold was crossed. Requires a busiest-thread reading; without it the window is reported as Unknown. Does <em>not</em> prove optimal efficiency, but confirms no single resource bottleneck rule was triggered.
             </p>
           </div>
 

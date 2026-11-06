@@ -1,6 +1,7 @@
 package com.perftrace.dto;
 
 import com.perftrace.entity.RunStatus;
+import com.perftrace.entity.WorkloadType;
 import java.time.Instant;
 
 public class AnalysisRunDto {
@@ -8,6 +9,7 @@ public class AnalysisRunDto {
     private Long id;
     private String fileName;
     private String description;
+    private WorkloadType workloadType;
     private RunStatus status;
     private String errorMessage;
     private Double totalDurationSeconds;
@@ -59,6 +61,9 @@ public class AnalysisRunDto {
 
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
+
+    public WorkloadType getWorkloadType() { return workloadType; }
+    public void setWorkloadType(WorkloadType workloadType) { this.workloadType = workloadType; }
 
     public RunStatus getStatus() { return status; }
     public void setStatus(RunStatus status) { this.status = status; }

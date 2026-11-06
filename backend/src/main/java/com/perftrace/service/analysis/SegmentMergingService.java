@@ -46,145 +46,77 @@ public class SegmentMergingService {
     }
 
     public List<DetectedSegment> merge(List<ClassifiedWindow> windows) {
-        List<DetectedSegment> rawSegments = new ArrayList<>();
-        if (windows.isEmpty()) return rawSegments;
+        List<DetectedSegment> result = new ArrayList<>();
+        if (windows == null || windows.isEmpty()) return result;
 
-        // Step 1: Initial contiguous merge
-        DetectedSegment current = null;
-        List<TimeWindow> segmentWindows = new ArrayList<>();
+        // Step 1: Initial contiguous merge into drafts that retain their source windows,
+        // so aggregate metrics can be recomputed if smoothing later joins drafts.
+        List<SegmentDraft> drafts = new ArrayList<>();
+        SegmentDraft current = null;
 
         for (ClassifiedWindow cw : windows) {
-            if (current == null) {
-                current = createSegment(cw);
-                segmentWindows.add(cw.getWindow());
-            } else if (canMerge(current, cw)) {
-                // Extend current segment
-                current.setEndOffsetSeconds(cw.getWindow().getEndOffsetSeconds());
-                current.setDurationSeconds(Math.round((current.getEndOffsetSeconds() - current.getStartOffsetSeconds()) * 100.0) / 100.0);
-                segmentWindows.add(cw.getWindow());
+            if (current == null || !canMerge(current, cw)) {
+                if (current != null) drafts.add(current);
+                current = new SegmentDraft(cw);
             } else {
-                finalizeSegmentMetrics(current, segmentWindows);
-                rawSegments.add(current);
-
-                current = createSegment(cw);
-                segmentWindows.clear();
-                segmentWindows.add(cw.getWindow());
+                current.extend(cw);
             }
         }
-
-        if (current != null) {
-            finalizeSegmentMetrics(current, segmentWindows);
-            rawSegments.add(current);
-        }
+        if (current != null) drafts.add(current);
 
         // Step 2: Short-segment smoothing
-        return applySmoothing(rawSegments);
+        List<SegmentDraft> smoothed = applySmoothing(drafts);
+
+        // Step 3: Compute metrics once, after the final segment boundaries are known.
+        for (SegmentDraft draft : smoothed) {
+            finalizeSegmentMetrics(draft);
+            result.add(draft.segment);
+        }
+        return result;
     }
 
-    private boolean canMerge(DetectedSegment segment, ClassifiedWindow cw) {
+    private boolean canMerge(SegmentDraft draft, ClassifiedWindow cw) {
+        DetectedSegment segment = draft.segment;
         if (segment.getClassification() != cw.getClassification()) return false;
         // Temporal adjacency required
         if (Math.abs(segment.getEndOffsetSeconds() - cw.getWindow().getStartOffsetSeconds()) > 0.001) return false;
-        // Throttle compatibility
-        boolean segmentThrottled = (segment.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG ||
-                                    segment.getThrottleEvidence() == ThrottleEvidence.HEURISTIC_DETECTED);
-        boolean windowThrottled = (cw.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG ||
-                                   cw.getThrottleEvidence() == ThrottleEvidence.HEURISTIC_DETECTED);
-        return segmentThrottled == windowThrottled;
+        return isThrottled(segment.getThrottleEvidence()) == isThrottled(cw.getThrottleEvidence());
     }
 
-    private DetectedSegment createSegment(ClassifiedWindow cw) {
-        DetectedSegment seg = new DetectedSegment();
-        seg.setStartOffsetSeconds(cw.getWindow().getStartOffsetSeconds());
-        seg.setEndOffsetSeconds(cw.getWindow().getEndOffsetSeconds());
-        seg.setDurationSeconds(Math.round(cw.getWindow().getDurationSeconds() * 100.0) / 100.0);
-        seg.setClassification(cw.getClassification());
-        seg.setThrottleEvidence(cw.getThrottleEvidence());
-        seg.setEvidenceExplanation(cw.getEvidenceExplanation());
-        return seg;
+    private boolean isThrottled(ThrottleEvidence evidence) {
+        return evidence == ThrottleEvidence.HARDWARE_FLAG || evidence == ThrottleEvidence.HEURISTIC_DETECTED;
     }
 
-    private void finalizeSegmentMetrics(DetectedSegment segment, List<TimeWindow> windows) {
-        List<TelemetrySample> allSamples = new ArrayList<>();
-        for (TimeWindow w : windows) {
-            allSamples.addAll(w.getSamples());
-        }
+    private List<SegmentDraft> applySmoothing(List<SegmentDraft> drafts) {
+        if (drafts.size() <= 2) return new ArrayList<>(drafts);
 
-        segment.setSampleCount(allSamples.size());
-        if (allSamples.isEmpty()) return;
-
-        double sumCpuLoad = 0; int countCpuLoad = 0;
-        double sumGpuLoad = 0; int countGpuLoad = 0;
-        double sumCpuThread = 0; int countCpuThread = 0;
-        double sumCpuTemp = 0; int countCpuTemp = 0;
-        double sumGpuTemp = 0; int countGpuTemp = 0;
-        double sumCpuClock = 0; int countCpuClock = 0;
-        double sumGpuClock = 0; int countGpuClock = 0;
-        Double peakCpu = null;
-        Double peakGpu = null;
-
-        for (TelemetrySample s : allSamples) {
-            if (s.getCpuTotalLoad() != null) { sumCpuLoad += s.getCpuTotalLoad(); countCpuLoad++; }
-            if (s.getGpuLoad() != null) { sumGpuLoad += s.getGpuLoad(); countGpuLoad++; }
-            if (s.getCpuMaxThreadLoad() != null) { sumCpuThread += s.getCpuMaxThreadLoad(); countCpuThread++; }
-            if (s.getCpuTempC() != null) {
-                sumCpuTemp += s.getCpuTempC(); countCpuTemp++;
-                peakCpu = (peakCpu == null) ? s.getCpuTempC() : Math.max(peakCpu, s.getCpuTempC());
-            }
-            if (s.getGpuTempC() != null) {
-                sumGpuTemp += s.getGpuTempC(); countGpuTemp++;
-                peakGpu = (peakGpu == null) ? s.getGpuTempC() : Math.max(peakGpu, s.getGpuTempC());
-            }
-            if (s.getCpuClockMhz() != null) { sumCpuClock += s.getCpuClockMhz(); countCpuClock++; }
-            if (s.getGpuClockMhz() != null) { sumGpuClock += s.getGpuClockMhz(); countGpuClock++; }
-        }
-
-        if (countCpuLoad > 0) segment.setAvgCpuLoad(round(sumCpuLoad / countCpuLoad));
-        if (countGpuLoad > 0) segment.setAvgGpuLoad(round(sumGpuLoad / countGpuLoad));
-        if (countCpuThread > 0) segment.setAvgCpuMaxThread(round(sumCpuThread / countCpuThread));
-        if (countCpuTemp > 0) segment.setAvgCpuTempC(round(sumCpuTemp / countCpuTemp));
-        if (countGpuTemp > 0) segment.setAvgGpuTempC(round(sumGpuTemp / countGpuTemp));
-        if (countCpuClock > 0) segment.setAvgCpuClockMhz(round(sumCpuClock / countCpuClock));
-        if (countGpuClock > 0) segment.setAvgGpuClockMhz(round(sumGpuClock / countGpuClock));
-        segment.setPeakCpuTempC(peakCpu);
-        segment.setPeakGpuTempC(peakGpu);
-    }
-
-    private List<DetectedSegment> applySmoothing(List<DetectedSegment> segments) {
-        if (segments.size() <= 2) return segments;
-
-        List<DetectedSegment> smoothed = new ArrayList<>();
+        List<SegmentDraft> smoothed = new ArrayList<>();
         int i = 0;
 
-        while (i < segments.size()) {
-            DetectedSegment curr = segments.get(i);
+        while (i < drafts.size()) {
+            SegmentDraft curr = drafts.get(i);
 
             // Check if current segment is brief (< smoothingSeconds)
             // AND surrounded by identical classification on both sides
             // AND not carrying a critical thermal throttling flag
-            if (i > 0 && i < segments.size() - 1 && curr.getDurationSeconds() < smoothingSeconds) {
-                DetectedSegment prev = smoothed.get(smoothed.size() - 1);
-                DetectedSegment next = segments.get(i + 1);
+            if (i > 0 && i < drafts.size() - 1 && curr.segment.getDurationSeconds() < smoothingSeconds) {
+                SegmentDraft prev = smoothed.get(smoothed.size() - 1);
+                SegmentDraft next = drafts.get(i + 1);
 
-                boolean currThrottled = (curr.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG ||
-                                        curr.getThrottleEvidence() == ThrottleEvidence.HEURISTIC_DETECTED);
-                boolean prevThrottled = (prev.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG ||
-                                        prev.getThrottleEvidence() == ThrottleEvidence.HEURISTIC_DETECTED);
-                boolean nextThrottled = (next.getThrottleEvidence() == ThrottleEvidence.HARDWARE_FLAG ||
-                                        next.getThrottleEvidence() == ThrottleEvidence.HEURISTIC_DETECTED);
+                boolean currThrottled = isThrottled(curr.segment.getThrottleEvidence());
+                boolean prevThrottled = isThrottled(prev.segment.getThrottleEvidence());
+                boolean nextThrottled = isThrottled(next.segment.getThrottleEvidence());
 
                 // Temporal adjacency between prev->curr and curr->next
-                boolean adjacent = Math.abs(prev.getEndOffsetSeconds() - curr.getStartOffsetSeconds()) < 0.001
-                    && Math.abs(curr.getEndOffsetSeconds() - next.getStartOffsetSeconds()) < 0.001;
+                boolean adjacent = Math.abs(prev.segment.getEndOffsetSeconds() - curr.segment.getStartOffsetSeconds()) < 0.001
+                    && Math.abs(curr.segment.getEndOffsetSeconds() - next.segment.getStartOffsetSeconds()) < 0.001;
 
                 if (!currThrottled && !prevThrottled && !nextThrottled
-                        && prev.getClassification() == next.getClassification()
+                        && prev.segment.getClassification() == next.segment.getClassification()
                         && adjacent
-                        && prev.getThrottleEvidence() == next.getThrottleEvidence()) {
-                    // Absorb curr and next into prev
-                    prev.setEndOffsetSeconds(next.getEndOffsetSeconds());
-                    prev.setDurationSeconds(Math.round((prev.getEndOffsetSeconds() - prev.getStartOffsetSeconds()) * 100.0) / 100.0);
-                    prev.setSampleCount(prev.getSampleCount() + curr.getSampleCount() + next.getSampleCount());
+                        && prev.segment.getThrottleEvidence() == next.segment.getThrottleEvidence()) {
+                    // Absorb curr and next into prev, retaining all source windows for metrics.
+                    prev.absorb(curr, next);
                     i += 2;
                     continue;
                 }
@@ -197,7 +129,66 @@ public class SegmentMergingService {
         return smoothed;
     }
 
-    private double round(double v) {
+    /**
+     * Mutable merge draft. Keeps one aggregate window instead of the source sample rows,
+     * so averages, peaks and sample counts always describe the complete final segment
+     * while memory remains independent of CSV row count.
+     */
+    private static final class SegmentDraft {
+        private final DetectedSegment segment;
+        private final TimeWindow metrics;
+
+        private SegmentDraft(ClassifiedWindow cw) {
+            this.segment = new DetectedSegment();
+            this.segment.setStartOffsetSeconds(cw.getWindow().getStartOffsetSeconds());
+            this.segment.setEndOffsetSeconds(cw.getWindow().getEndOffsetSeconds());
+            this.segment.setDurationSeconds(round(cw.getWindow().getDurationSeconds()));
+            this.segment.setClassification(cw.getClassification());
+            this.segment.setThrottleEvidence(cw.getThrottleEvidence());
+            this.segment.setEvidenceExplanation(cw.getEvidenceExplanation());
+            this.metrics = new TimeWindow(
+                cw.getWindow().getStartOffsetSeconds(),
+                cw.getWindow().getEndOffsetSeconds()
+            );
+            this.metrics.addWindow(cw.getWindow());
+        }
+
+        private void extend(ClassifiedWindow cw) {
+            setEnd(cw.getWindow().getEndOffsetSeconds());
+            this.metrics.addWindow(cw.getWindow());
+        }
+
+        private void absorb(SegmentDraft... absorbed) {
+            for (SegmentDraft draft : absorbed) {
+                setEnd(draft.segment.getEndOffsetSeconds());
+                this.metrics.addWindow(draft.metrics);
+            }
+        }
+
+        private void setEnd(double endOffsetSeconds) {
+            this.segment.setEndOffsetSeconds(endOffsetSeconds);
+            this.segment.setDurationSeconds(round(endOffsetSeconds - this.segment.getStartOffsetSeconds()));
+        }
+    }
+
+    private static void finalizeSegmentMetrics(SegmentDraft draft) {
+        DetectedSegment segment = draft.segment;
+        TimeWindow metrics = draft.metrics;
+
+        segment.setSampleCount(metrics.getSampleCount());
+        segment.setAvgCpuLoad(metrics.getAvgCpuTotalLoad());
+        segment.setAvgGpuLoad(metrics.getAvgGpuLoad());
+        segment.setAvgCpuMaxThread(metrics.getAvgCpuMaxThreadLoad());
+        segment.setAvgCpuTempC(metrics.getAvgCpuTempC());
+        segment.setAvgGpuTempC(metrics.getAvgGpuTempC());
+        // Active-only clocks: idle samples must not drag the segment average down.
+        segment.setAvgCpuClockMhz(metrics.getAvgCpuClockMhz());
+        segment.setAvgGpuClockMhz(metrics.getAvgGpuClockMhz());
+        segment.setPeakCpuTempC(metrics.getPeakCpuTempC());
+        segment.setPeakGpuTempC(metrics.getPeakGpuTempC());
+    }
+
+    private static double round(double v) {
         return Math.round(v * 10.0) / 10.0;
     }
 }

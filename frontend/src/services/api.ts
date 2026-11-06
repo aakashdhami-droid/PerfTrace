@@ -6,6 +6,7 @@ import {
   RunComparison,
   UploadResponse,
   User,
+  WorkloadType,
 } from '../types';
 
 const API_BASE = '/api';
@@ -27,6 +28,27 @@ function getAuthHeader(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+async function readBody(response: Response): Promise<any> {
+  if (response.status === 204) return {};
+
+  const contentType = response.headers.get('content-type');
+  if (contentType && contentType.includes('application/json')) {
+    try {
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+  return response.text();
+}
+
+function clearAuthOn401(status: number) {
+  if (status !== 401) return;
+  localStorage.removeItem('perftrace_token');
+  localStorage.removeItem('perftrace_user');
+  window.dispatchEvent(new Event('perftrace_auth_change'));
+}
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const headers = {
     ...getAuthHeader(),
@@ -38,29 +60,14 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     headers,
   });
 
-  if (response.status === 204) {
-    return {} as T;
-  }
-
-  let body: any;
-  const contentType = response.headers.get('content-type');
-  if (contentType && contentType.includes('application/json')) {
-    body = await response.json();
-  } else {
-    body = await response.text();
-  }
+  const body = await readBody(response);
 
   if (!response.ok) {
     const errorMsg = (typeof body === 'object' && body?.message)
       ? body.message
       : (typeof body === 'string' && body.length > 0 ? body : `Request failed with status ${response.status}`);
 
-    if (response.status === 401) {
-      localStorage.removeItem('perftrace_token');
-      localStorage.removeItem('perftrace_user');
-      window.dispatchEvent(new Event('perftrace_auth_change'));
-    }
-
+    clearAuthOn401(response.status);
     throw new ApiError(response.status, errorMsg, body);
   }
 
@@ -118,11 +125,18 @@ export const api = {
   },
 
   // Runs
-  async uploadRun(file: File, description?: string): Promise<UploadResponse> {
+  async uploadRun(
+    file: File,
+    description?: string,
+    workloadType?: WorkloadType,
+  ): Promise<UploadResponse> {
     const formData = new FormData();
     formData.append('file', file);
     if (description) {
       formData.append('description', description);
+    }
+    if (workloadType && workloadType !== 'UNSPECIFIED') {
+      formData.append('workloadType', workloadType);
     }
 
     const headers = getAuthHeader();
@@ -132,11 +146,15 @@ export const api = {
       body: formData,
     });
 
-    const body = await response.json();
+    const body = await readBody(response);
     if (!response.ok) {
-      throw new ApiError(response.status, body?.message || 'File upload failed', body);
+      const errorMsg = (typeof body === 'object' && body?.message)
+        ? body.message
+        : (typeof body === 'string' && body.length > 0 ? body : 'File upload failed');
+      clearAuthOn401(response.status);
+      throw new ApiError(response.status, errorMsg, body);
     }
-    return body;
+    return body as UploadResponse;
   },
 
   async listRuns(page = 0, size = 20): Promise<{ content: AnalysisRun[]; totalElements: number; totalPages: number }> {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { DetectedSegment, Classification } from '../types';
 import { ClassificationBadge } from './ClassificationBadge';
 import { ThrottleBadge } from './ThrottleBadge';
@@ -13,6 +13,20 @@ export const SegmentTimeline: React.FC<Props> = ({ segments, totalDurationSecond
   const [selectedSegment, setSelectedSegment] = useState<DetectedSegment | null>(
     segments.length > 0 ? segments[0] : null
   );
+
+  // Segments arrive asynchronously after the parent's API call. Keep the inspector in sync:
+  // select the first segment on initial load, and refresh the selected object when new data
+  // arrives (or clear it if the selected segment no longer exists).
+  useEffect(() => {
+    setSelectedSegment((current) => {
+      if (segments.length === 0) return null;
+      if (current) {
+        const refreshed = segments.find((segment) => segment.id === current.id);
+        if (refreshed) return refreshed;
+      }
+      return segments[0];
+    });
+  }, [segments]);
 
   const effectiveTotal = totalDurationSeconds && totalDurationSeconds > 0
     ? totalDurationSeconds

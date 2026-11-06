@@ -155,4 +155,150 @@ class CsvIngestionServiceTest {
         assertThat(result.getSamples().get(1).getCpuClockMhz()).isNull();
         assertThat(result.getSamples().get(2).getCpuTempC()).isNull();
     }
+
+    @Test
+    @DisplayName("An invalid first timestamp must not shift later offsets by an epoch-sized amount")
+    void testInvalidFirstTimestampDoesNotCorruptOffsets() throws IOException {
+        String csv = """
+            Date,Time,"Total CPU Usage [%]","GPU Core Load [%]"
+            N/A,N/A,50.0,60.0
+            26.10.2026,10:00:02,51.0,61.0
+            26.10.2026,10:00:04,52.0,62.0
+            26.10.2026,10:00:06,53.0,63.0
+            """;
+
+        CsvParseResult result = csvIngestionService.parse(
+            new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(result.getSamples()).hasSize(4);
+        assertThat(result.getSamples().get(0).getTimeOffsetSeconds()).isEqualTo(0.0);
+        assertThat(result.getSamples().get(1).getTimeOffsetSeconds()).isEqualTo(2.0);
+        assertThat(result.getSamples().get(2).getTimeOffsetSeconds()).isEqualTo(4.0);
+        assertThat(result.getSamples().get(3).getTimeOffsetSeconds()).isEqualTo(6.0);
+        assertThat(result.getTotalDurationSeconds()).isEqualTo(6.0);
+        assertThat(result.getWarnings()).anyMatch(w -> w.contains("unparseable timestamps"));
+        assertThat(result.getWarnings()).anyMatch(w -> w.contains("first valid timestamp"));
+    }
+
+    @Test
+    @DisplayName("A malformed timestamp mid-file must continue from the last known time")
+    void testMalformedMidFileTimestampKeepsTimelineMonotonic() throws IOException {
+        String csv = """
+            Date,Time,"Total CPU Usage [%]","GPU Core Load [%]"
+            26.10.2026,10:00:00,50.0,60.0
+            26.10.2026,10:00:02,51.0,61.0
+            N/A,N/A,52.0,62.0
+            26.10.2026,10:00:06,53.0,63.0
+            """;
+
+        CsvParseResult result = csvIngestionService.parse(
+            new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(result.getValidRows()).isEqualTo(4);
+        assertThat(result.getSamples()).extracting(s -> s.getTimeOffsetSeconds())
+            .containsExactly(0.0, 2.0, 4.0, 6.0);
+        assertThat(result.getTotalDurationSeconds()).isEqualTo(6.0);
+        assertThat(result.getWarnings()).anyMatch(w -> w.contains("unparseable timestamps"));
+    }
+
+    @Test
+    @DisplayName("Changing calendar date at midnight must not reset or duplicate offsets")
+    void testDateRolloverAcrossMidnight() throws IOException {
+        String csv = """
+            Date,Time,"Total CPU Usage [%]","GPU Core Load [%]"
+            26.10.2026,23:59:58,50.0,60.0
+            26.10.2026,23:59:59,51.0,61.0
+            27.10.2026,00:00:00,52.0,62.0
+            27.10.2026,00:00:02,53.0,63.0
+            """;
+
+        CsvParseResult result = csvIngestionService.parse(
+            new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(result.getSamples()).extracting(s -> s.getTimeOffsetSeconds())
+            .containsExactly(0.0, 1.0, 2.0, 4.0);
+        assertThat(result.getTotalDurationSeconds()).isEqualTo(4.0);
+    }
+
+    @Test
+    @DisplayName("Logs without timestamp columns should use a documented 1s synthetic interval")
+    void testNoTimestampColumnUsesSyntheticOffsets() throws IOException {
+        String csv = """
+            "Total CPU Usage [%]","GPU Core Load [%]"
+            50.0,60.0
+            51.0,61.0
+            52.0,62.0
+            """;
+
+        CsvParseResult result = csvIngestionService.parse(
+            new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(result.getSamples()).extracting(s -> s.getTimeOffsetSeconds())
+            .containsExactly(0.0, 1.0, 2.0);
+        assertThat(result.getTotalDurationSeconds()).isEqualTo(2.0);
+        assertThat(result.getWarnings()).anyMatch(w -> w.contains("No timestamp column detected"));
+    }
+
+    @Test
+    @DisplayName("Should handle midnight rollover for time-only logs")
+    void testMidnightRollover() throws IOException {
+        String csv = """
+            Time,"Total CPU Usage [%]","GPU Core Load [%]"
+            23:59:58,50.0,60.0
+            23:59:59,51.0,61.0
+            00:00:00,52.0,62.0
+            00:00:02,53.0,63.0
+            """;
+
+        CsvParseResult result = csvIngestionService.parse(
+            new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(result.getSamples()).hasSize(4);
+        assertThat(result.getSamples().get(0).getTimeOffsetSeconds()).isEqualTo(0.0);
+        assertThat(result.getSamples().get(1).getTimeOffsetSeconds()).isEqualTo(1.0);
+        assertThat(result.getSamples().get(2).getTimeOffsetSeconds()).isEqualTo(2.0);
+        assertThat(result.getSamples().get(3).getTimeOffsetSeconds()).isEqualTo(4.0);
+        assertThat(result.getTotalDurationSeconds()).isEqualTo(4.0);
+    }
+
+    @Test
+    @DisplayName("Should strip units and normalize GHz, decimal commas, and thousands separators")
+    void testNumericUnitNormalization() throws IOException {
+        String csv = """
+            Time,"Total CPU Usage [%]","GPU Core Load [%]","Core Clocks (avg) [MHz]","CPU Package [°C]"
+            0,72 %,88 %,4.2 GHz,"65,5 °C"
+            1,73 %,89 %,"4,250 MHz","66,0 °C"
+            2,74 %,90 %,5.0 GHz,"67,5 °C"
+            """;
+
+        CsvParseResult result = csvIngestionService.parse(
+            new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(result.getSamples()).hasSize(3);
+        assertThat(result.getSamples().get(0).getCpuTotalLoad()).isEqualTo(72.0);
+        assertThat(result.getSamples().get(0).getGpuLoad()).isEqualTo(88.0);
+        assertThat(result.getSamples().get(0).getCpuClockMhz()).isEqualTo(4200.0);
+        assertThat(result.getSamples().get(0).getCpuTempC()).isEqualTo(65.5);
+        assertThat(result.getSamples().get(1).getCpuClockMhz()).isEqualTo(4250.0);
+        assertThat(result.getSamples().get(2).getCpuClockMhz()).isEqualTo(5000.0);
+    }
+
+    @Test
+    @DisplayName("Should preserve monotonic offsets and warn when timestamps are out of order")
+    void testOutOfOrderTimestamps() throws IOException {
+        String csv = """
+            Time,"Total CPU Usage [%]","GPU Core Load [%]"
+            00:00:00,50.0,60.0
+            00:00:04,51.0,61.0
+            00:00:02,52.0,62.0
+            00:00:06,53.0,63.0
+            """;
+
+        CsvParseResult result = csvIngestionService.parse(
+            new ByteArrayInputStream(csv.getBytes(StandardCharsets.UTF_8)));
+
+        assertThat(result.getSamples()).extracting(s -> s.getTimeOffsetSeconds())
+            .containsExactly(0.0, 4.0, 4.0, 6.0);
+        assertThat(result.getWarnings()).anyMatch(w -> w.contains("out-of-order"));
+    }
 }

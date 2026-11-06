@@ -98,7 +98,7 @@ class AnalysisRunIntegrationTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.fileName").value("benchmark_cpu.csv"))
             .andExpect(jsonPath("$.status").value("COMPLETED"))
-            .andExpect(jsonPath("$.cpuBoundSeconds").value(10.0));
+            .andExpect(jsonPath("$.cpuBoundSeconds").value(6.0));
 
         // 4. User A retrieves detected segments
         mockMvc.perform(get("/api/runs/" + runIdA + "/segments")
@@ -118,15 +118,15 @@ class AnalysisRunIntegrationTest {
         // 6. User B registers
         String tokenUserB = registerAndGetToken("analystB", "analystB@example.com");
 
-        // 7. Security: User B tries to view User A's run -> 403 Forbidden
+        // 7. Security: User B tries to view User A's run -> 404 (IDOR-safe, no existence leak)
         mockMvc.perform(get("/api/runs/" + runIdA)
                 .header("Authorization", "Bearer " + tokenUserB))
-            .andExpect(status().isForbidden());
+            .andExpect(status().isNotFound());
 
-        // 8. Security: User B tries to delete User A's run -> 403 Forbidden
+        // 8. Security: User B tries to delete User A's run -> 404 (IDOR-safe)
         mockMvc.perform(delete("/api/runs/" + runIdA)
                 .header("Authorization", "Bearer " + tokenUserB))
-            .andExpect(status().isForbidden());
+            .andExpect(status().isNotFound());
 
         // 9. User A uploads a second run (GPU-bound)
         String gpuCsv = """
@@ -168,5 +168,145 @@ class AnalysisRunIntegrationTest {
         mockMvc.perform(get("/api/runs/" + runIdA)
                 .header("Authorization", "Bearer " + tokenUserA))
             .andExpect(status().isNotFound());
+    }
+
+    @Test
+    @DisplayName("Upload must persist and return the user-declared workload type")
+    void testWorkloadTypeRoundTrip() throws Exception {
+        String token = registerAndGetToken("workloadUser", "workload@example.com");
+
+        String csv = """
+            Time,"Total CPU Usage [%]","Core Max [%]","CPU Package [°C]","Core Clocks (avg) [MHz]","GPU Core Load [%]","GPU Temperature [°C]","GPU Clock [MHz]","Core Thermal Throttling [Yes/No]"
+            0,90.0,95.0,75.0,4400.0,60.0,65.0,1900.0,No
+            2,91.0,96.0,76.0,4400.0,61.0,65.5,1900.0,No
+            4,92.0,97.0,77.0,4400.0,62.0,66.0,1900.0,No
+            """;
+
+        MockMultipartFile gamingFile = new MockMultipartFile(
+            "file", "gaming.csv", "text/csv", csv.getBytes(StandardCharsets.UTF_8));
+        MvcResult gamingUpload = mockMvc.perform(multipart("/api/runs/upload")
+                .file(gamingFile)
+                .param("workloadType", "GAMING")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isCreated())
+            .andExpect(jsonPath("$.workloadType").value("GAMING"))
+            .andReturn();
+        Long gamingRunId = objectMapper.readTree(gamingUpload.getResponse().getContentAsString())
+            .get("runId").asLong();
+
+        mockMvc.perform(get("/api/runs/" + gamingRunId)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.workloadType").value("GAMING"));
+
+        MockMultipartFile unspecifiedFile = new MockMultipartFile(
+            "file", "unspecified.csv", "text/csv", csv.getBytes(StandardCharsets.UTF_8));
+        mockMvc.perform(multipart("/api/runs/upload")
+                .file(unspecifiedFile)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isCreated())
+            .andExpect(jsonPath("$.workloadType").value("UNSPECIFIED"));
+    }
+
+    @Test
+    @DisplayName("Every run endpoint must reject cross-user access without leaking run existence")
+    void testCrossUserAccessIsDeniedForEveryRunEndpoint() throws Exception {
+        String tokenA = registerAndGetToken("ownerA", "ownerA@example.com");
+        String tokenB = registerAndGetToken("ownerB", "ownerB@example.com");
+
+        Long runA = uploadSimpleRun(tokenA, "owner_a.csv", 90.0, 60.0);
+        Long runB = uploadSimpleRun(tokenB, "owner_b.csv", 45.0, 98.0);
+
+        // User B must not read or mutate User A's run through any endpoint. 404 is used
+        // deliberately so attackers cannot enumerate valid run IDs.
+        mockMvc.perform(get("/api/runs/" + runA).header("Authorization", "Bearer " + tokenB))
+            .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/runs/" + runA + "/segments").header("Authorization", "Bearer " + tokenB))
+            .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/runs/" + runA + "/samples").header("Authorization", "Bearer " + tokenB))
+            .andExpect(status().isNotFound());
+        mockMvc.perform(delete("/api/runs/" + runA).header("Authorization", "Bearer " + tokenB))
+            .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/runs/compare?a=" + runA + "&b=" + runB)
+                .header("Authorization", "Bearer " + tokenB))
+            .andExpect(status().isNotFound());
+
+        // Listing must only ever return the caller's own runs.
+        mockMvc.perform(get("/api/runs").header("Authorization", "Bearer " + tokenB))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.totalElements").value(1))
+            .andExpect(jsonPath("$.content[0].id").value(runB));
+    }
+
+    @Test
+    @DisplayName("Database downsampling must preserve a short stress spike instead of averaging it away")
+    void testDownsamplingPreservesShortSpike() throws Exception {
+        String token = registerAndGetToken("spikeUser", "spike@example.com");
+
+        StringBuilder csv = new StringBuilder();
+        csv.append("Time,\"Total CPU Usage [%]\",\"Core Max [%]\",\"CPU Package [°C]\",")
+            .append("\"Core Clocks (avg) [MHz]\",\"GPU Core Load [%]\",\"GPU Temperature [°C]\",")
+            .append("\"GPU Clock [MHz]\",\"Core Thermal Throttling [Yes/No]\"\n");
+        for (int i = 0; i < 240; i++) {
+            boolean spike = i == 137;
+            double cpu = spike ? 99.0 : 20.0 + (i % 5);
+            double gpu = spike ? 99.0 : 30.0 + (i % 4);
+            double temp = spike ? 95.0 : 60.0;
+            csv.append(i).append(',')
+                .append(cpu).append(',')
+                .append(spike ? 99.0 : 35.0).append(',')
+                .append(temp).append(',')
+                .append(spike ? 3000.0 : 4000.0).append(',')
+                .append(gpu).append(',')
+                .append(temp).append(',')
+                .append(spike ? 1800.0 : 1500.0).append(',')
+                .append("No\n");
+        }
+
+        MockMultipartFile file = new MockMultipartFile(
+            "file", "spike.csv", "text/csv", csv.toString().getBytes(StandardCharsets.UTF_8));
+        MvcResult upload = mockMvc.perform(multipart("/api/runs/upload")
+                .file(file)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isCreated())
+            .andReturn();
+        Long runId = objectMapper.readTree(upload.getResponse().getContentAsString()).get("runId").asLong();
+
+        MvcResult samples = mockMvc.perform(get("/api/runs/" + runId + "/samples?maxPoints=10")
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isOk())
+            .andReturn();
+
+        var points = objectMapper.readTree(samples.getResponse().getContentAsString());
+        assertThat(points.size()).isBetween(1, 10);
+        boolean spikePreserved = false;
+        for (var point : points) {
+            if (point.hasNonNull("cpuTotalLoad") && point.get("cpuTotalLoad").asDouble() == 99.0) {
+                spikePreserved = true;
+            }
+        }
+        assertThat(spikePreserved)
+            .as("The 99%% CPU spike must survive min/max-per-bucket downsampling")
+            .isTrue();
+    }
+
+    private Long uploadSimpleRun(String token, String fileName, double cpuLoad, double gpuLoad)
+        throws Exception {
+
+        String csv = String.format("""
+            Date,Time,"Total CPU Usage [%%]","Core Max [%%]","CPU Package [°C]","Core Clocks (avg) [MHz]","GPU Core Load [%%]","GPU Temperature [°C]","GPU Clock [MHz]","Core Thermal Throttling [Yes/No]"
+            26.10.2026,12:00:00,%.1f,%.1f,70.0,4400.0,%.1f,65.0,1900.0,No
+            26.10.2026,12:00:02,%.1f,%.1f,70.5,4400.0,%.1f,65.5,1900.0,No
+            26.10.2026,12:00:04,%.1f,%.1f,71.0,4400.0,%.1f,66.0,1900.0,No
+            """, cpuLoad, cpuLoad, gpuLoad, cpuLoad, cpuLoad, gpuLoad, cpuLoad, cpuLoad, gpuLoad);
+
+        MockMultipartFile file = new MockMultipartFile(
+            "file", fileName, "text/csv", csv.getBytes(StandardCharsets.UTF_8));
+        MvcResult response = mockMvc.perform(multipart("/api/runs/upload")
+                .file(file)
+                .header("Authorization", "Bearer " + token))
+            .andExpect(status().isCreated())
+            .andReturn();
+        return objectMapper.readTree(response.getResponse().getContentAsString()).get("runId").asLong();
     }
 }

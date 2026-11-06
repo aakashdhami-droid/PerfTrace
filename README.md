@@ -1,201 +1,253 @@
 # PerfTrace — Hardware Telemetry Diagnostic Engine
 
-PerfTrace is a full-stack hardware telemetry diagnostic application built with **Spring Boot**, **PostgreSQL 16**, and **React 19 + TypeScript**. It ingests high-frequency CSV logs exported by **HWiNFO64**, aggregates readings into statistical 10-second windows, classifies compute bottlenecks using transparent, rule-based heuristics, detects potential thermal throttling, and enables side-by-side run comparisons with strict ownership enforcement.
+PerfTrace is a full-stack hardware telemetry diagnostic application built with **Spring Boot 4**, **PostgreSQL 16**, and **React 19 + TypeScript**. It ingests CSV logs exported by **HWiNFO64**, aggregates readings into statistical 10-second windows, classifies compute bottlenecks using transparent rule-based heuristics, detects possible thermal throttling, and supports side-by-side run comparison with strict ownership enforcement.
 
-Designed as an enterprise-grade portfolio project for **MCA campus placements and technical interviews**, PerfTrace demonstrates sound backend architecture, data integrity, explainability, and defensive telemetry analysis.
+Designed as a portfolio project for MCA campus placements and technical interviews, PerfTrace emphasizes explainability, data integrity, bounded-memory ingestion, and defensive telemetry analysis.
 
 ---
 
-## Architecture & Core Capabilities
+## What the Pipeline Actually Does
 
 ```
-  ┌─────────────────────────────────────────────────────────┐
-  │                 HWiNFO64 CSV Log Export                 │
-  └───────────────────────────┬─────────────────────────────┘
-                              │ Streaming OpenCSV Pipeline
-                              ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │   1. CsvIngestionService                                │
-  │   • BOM / UTF-8 / UTF-16 encoding auto-detection        │
-  │   • Canonical header mapping across sensor variations   │
-  │   • Missing sensor readings preserved as NULL (not 0)   │
-  │   • Discards secondary unit header rows                 │
-  └───────────────────────────┬─────────────────────────────┘
-                              │
-                              ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │   2. TimeWindowAggregator (10s statistical windows)     │
-  │   • Sub-second jitter reduction into discrete windows   │
-  │   • Gap detection (>15s pause) preserves timeline state │
-  └───────────────────────────┬─────────────────────────────┘
-                              │
-                              ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │   3. Heuristic Classification Detectors                 │
-  │   • IdleDetector: CPU < 20% AND GPU < 20%               │
-  │   • CpuBoundDetector: CPU > 80% (or single-core sat.)   │
-  │     while GPU has headroom (< 85%)                      │
-  │   • GpuBoundDetector: GPU utilization >= 90%            │
-  │   • Balanced: Neither crossed (not proof of optimality) │
-  │   • Unknown: Insufficient data or missing sensors       │
-  │   • ThermalThrottleDetector: Hard hardware flags vs     │
-  │     conservative heuristic (temp + load + >12% clock reg)│
-  └───────────────────────────┬─────────────────────────────┘
-                              │
-                              ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │   4. SegmentMergingService                              │
-  │   • 20s smoothing merges consecutive identical windows  │
-  │   • CRITICAL: Never smooths away throttle transitions   │
-  └───────────────────────────┬─────────────────────────────┘
-                              │
-                              ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │   5. PostgreSQL 16 Persistence & Comparison Engine      │
-  │   • Indexed tables: users, analysis_runs, samples,      │
-  │     detected_segments (Flyway versioned migrations)     │
-  │   • GET /api/runs/compare?a={idA}&b={idB}               │
-  │   • Comparability warnings: duration & idle disparities │
-  │   • Strict disclaimer: lower temp != higher performance │
-  └───────────────────────────┬─────────────────────────────┘
-                              │
-                              ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │   6. React 19 + TypeScript + Vite Dashboard             │
-  │   • Interactive segment timeline with click-to-inspect  │
-  │   • Downsampled time-series telemetry charts (Chart.js) │
-  │   • Side-by-side run comparison diffs & radar tables    │
-  └─────────────────────────────────────────────────────────┘
+HWiNFO64 CSV export
+        │
+        ▼
+1. Upload spooling + two-pass CSV scan
+   • Multipart upload is copied to a temporary file (never materialized as a row list)
+   • Pass 1: validate headers, count accepted/rejected rows, establish timestamp metadata
+   • Pass 2: stream rows one at a time into window aggregation and JDBC batches
+   • BOM detection (UTF-8 / UTF-16 LE / UTF-16 BE), unit header skipping
+   • Missing readings stay NULL; they are never coerced to zero
+        │
+        ▼
+2. Streaming 10s window aggregation
+   • Aggregate-only TimeWindow objects; raw samples are not retained by analysis
+   • Empty windows are kept so sampling gaps remain visible as UNKNOWN time
+   • Final window is clipped to the last observed timestamp
+   • CPU and GPU clock averages use only independently active samples
+        │
+        ▼
+3. Rule-based classification + thermal detection
+   • IdleDetector: CPU < 15% AND GPU < 15%
+   • CpuBoundDetector: GPU < 90% and (CPU total ≥ 90% or busiest thread ≥ 90%)
+   • GpuBoundDetector: GPU ≥ 95% and busiest thread < 85%
+   • BALANCED requires busiest-thread evidence; otherwise UNKNOWN
+   • Hardware throttle flags are distinguished from heuristic clock regression
+   • Preliminary P95 baseline excludes already-throttled windows before the final P90
+        │
+        ▼
+4. Segment merging
+   • Consecutive compatible windows are merged
+   • Short unthrottled blips may be smoothed, but throttle transitions are never smoothed away
+   • One aggregate metrics window per draft; source rows are not retained
+        │
+        ▼
+5. PostgreSQL persistence and comparison
+   • Flyway V1 + V2 migrations; Hibernate ddl-auto=validate
+   • JDBC batch inserts (1,000 rows per batch) inside one transaction
+   • Failed processing rolls back partial samples/segments and records the run as FAILED
+   • Chart downsampling runs in SQL with NTILE buckets + min/max stress ranking
+   • GET /api/runs/compare?a={runIdA}&b={runIdB}
+        │
+        ▼
+6. React dashboard
+   • Segment timeline with evidence
+   • Downsampled Chart.js time series
+   • Workload metadata selector and comparison warnings
 ```
 
 ---
 
 ## Technology Stack
 
-- **Backend**: Java 21 LTS, Spring Boot 4.1.2, Spring Security 7 (stateless JWT Lambda DSL), Spring Data JPA / Hibernate 7, OpenCSV 5.9, Flyway 12 (`flyway-database-postgresql`), SpringDoc OpenAPI 3.1.
-- **Database**: PostgreSQL 16.6 (standalone portable / containerized) with Flyway migrations.
-- **Frontend**: React 19, TypeScript 5, Vite 6, Chart.js, Lucide Icons, Glassmorphic CSS design system.
-- **Testing**: JUnit 5, Mockito, Spring Security Test, Spring Boot MockMvc, H2 (isolated in-memory test database for fast regression suites).
+- **Backend**: Java 21 LTS, Spring Boot 4.1.2, Spring Security 7 (stateless JWT), Spring Data JPA / Hibernate 7, OpenCSV 5.9, Flyway, SpringDoc OpenAPI.
+- **Database**: PostgreSQL 16 (local portable instance or Docker Compose). H2 is used only for fast tests.
+- **Frontend**: React 19, TypeScript 5, Vite 6, Chart.js, Lucide icons.
+- **Testing**: JUnit 5, Mockito, Spring Security Test, MockMvc, H2 for fast integration tests, Testcontainers PostgreSQL 16 for the database-compatibility suite, Vitest for the frontend API client and workload metadata helpers.
 
 ---
 
-## Diagnostic Principles & Guidelines
+## Diagnostic Principles
 
-1. **Strict Missing-Data Semantics**: Missing sensors or malformed cells are persisted and calculated as `null`—never defaulted to zero. A missing GPU sensor is classified as `UNKNOWN`, never `BALANCED`.
-2. **Balanced vs Optimal**: A classification of `BALANCED` signifies that neither CPU nor GPU crossed our explicit bottleneck thresholds; it is **never** presented as conclusive proof of optimal resource scheduling.
-3. **Hardware Flags vs Heuristic Throttling**: Hardware thermal flags (`Core Thermal Throttling [Yes/No]`, PROCHOT) are distinguished from heuristic throttling (sustained high temperature + active load + >12% clock frequency regression from baseline). Temperature alone never triggers a throttling diagnosis.
-4. **Run Comparison Humility**: When comparing two runs (`GET /api/runs/compare?a={idA}&b={idB}`), PerfTrace warns when runs differ significantly in duration (>1.3x) or idle ratio (>25%). It explicitly enforces the rule: *a lower operating temperature does not prove superior performance if clock frequencies dropped.*
+1. **Strict missing-data semantics**: missing or malformed cells become `null`. A window without both CPU total load and GPU load is `UNKNOWN`, not idle.
+2. **Busiest-thread evidence**: `BALANCED` requires a busiest CPU thread reading. Without it, PerfTrace reports `UNKNOWN` rather than guessing.
+3. **Balanced is not optimal**: `BALANCED` only means neither CPU nor GPU crossed PerfTrace's bottleneck thresholds.
+4. **Temperature alone is not throttling**: a heuristic throttle requires high temperature, active load, and a clock regression relative to a reference baseline. Hardware flags are reported separately as `HARDWARE_FLAG`.
+5. **Thermal baseline correction**: a preliminary P95 baseline identifies already-compressed windows; those windows are excluded before the final P90 reference is computed. A long throttled run therefore cannot lower its own baseline and hide the regression.
+6. **Active-workload clocks**: CPU and GPU clocks are averaged only over samples where that component was independently active, so idle GPU clocks do not drag down a CPU-bound average.
+7. **User-supplied workload metadata**: `workloadType` is declared at upload time and defaults to `UNSPECIFIED`. PerfTrace never infers workload type from sensor values. Comparisons warn when metadata is missing or differs.
+8. **Comparison humility**: a lower temperature does not prove higher performance. Comparisons report telemetry shifts, not proven throughput improvements.
 
 ---
 
-## Setup & Running Instructions
+## Bounded-Memory Ingestion — Exact Scope
 
-### 1. Prerequisites & Environment Variables
+The upload path does **not** retain every CSV row or every `TelemetrySample` in memory:
 
-Copy `.env.example` to `.env`:
+- The multipart file is spooled to a temporary file.
+- The first pass computes header mappings, row counts, timestamp baseline, warnings, and duration without retaining rows.
+- The second pass re-reads the spool and emits one normalized sample at a time.
+- `TimeWindow` stores aggregate sums, counts, peaks, clock histograms, and throttle counters only.
+- The clock baseline uses a fixed histogram of 20,001 one-MHz bins (about 80 KB per histogram).
+- Samples are inserted via JDBC batches of 1,000 rows.
+- Empty gap windows are retained, with a safety cap of 200,000 windows (more than 23 days at 10-second windows).
+
+Memory therefore scales with **recording duration / number of analysis windows plus fixed buffers**, not with the number of CSV rows. This is bounded-memory ingestion, not a claim of literal O(1) total memory.
+
+Chart downsampling also happens in the database. The query uses `NTILE` buckets and selects the lowest- and highest-stress row in each bucket, so short spikes survive instead of being averaged away.
+
+---
+
+## Setup & Running
+
+### 1. Prerequisites
+
+- JDK 21
+- Node.js 22 (or compatible)
+- PostgreSQL 16, either local or via Docker Compose
+- Docker only if you want to run the PostgreSQL Testcontainers test locally
+
+Copy `.env.example` to `.env` and set real values:
+
 ```bash
 cp .env.example .env
 ```
 
-Default configuration in `application.properties`:
+Default backend configuration:
 - Port: `8080`
 - Database: `jdbc:postgresql://localhost:5432/perftrace`
 - User: `perftrace`
-- Password: (blank or your secure password)
+- Password: from `PERFTRACE_DB_PASSWORD`
+- JWT secret: from `PERFTRACE_JWT_SECRET` (at least 256 bits)
 
-### 2. Starting PostgreSQL
+### 2. Start PostgreSQL
 
-#### Option A: Portable Standalone PostgreSQL (Workspace Environment)
+Portable local instance:
+
 ```powershell
 & "A:\Tools\pgsql\bin\pg_ctl.exe" start -D "A:\Tools\pgsql_data" -l "A:\Tools\pgsql\logfile.log"
 ```
 
-#### Option B: Docker Compose
+Or Docker Compose:
+
 ```bash
 docker compose up -d
 ```
 
-### 3. Starting the Spring Boot Backend
+### 3. Start the backend
 
-Using Maven Wrapper from `A:\Project\PerfTrace\backend`:
 ```powershell
-# Set JAVA_HOME if not on system PATH
 $env:JAVA_HOME = "A:\Tools\jdk-21.0.7+6"
-$env:PATH = "A:\Tools\jdk-21.0.7+6\bin;" + $env:PATH
-
 cd A:\Project\PerfTrace\backend
 .\mvnw.cmd spring-boot:run
 ```
-The backend initializes database tables via Flyway and listens on `http://localhost:8080`.
+
+Flyway applies `V1__init_schema.sql` and `V2__workload_metadata.sql` on startup, and Hibernate validates the resulting schema.
+
 - Swagger UI: `http://localhost:8080/swagger-ui.html`
 - OpenAPI JSON: `http://localhost:8080/api-docs`
 
-### 4. Starting the React Frontend
+### 4. Start the frontend
 
-From `A:\Project\PerfTrace\frontend`:
 ```powershell
-# Set Node on PATH if using portable installation
 $env:PATH = "A:\Tools\node-v22.15.0-win-x64;" + $env:PATH
-
 cd A:\Project\PerfTrace\frontend
+npm install
 npm run dev
 ```
-The frontend dev server opens on `http://localhost:5173/` and proxies all `/api` requests to `http://localhost:8080`.
 
-To build the production bundle:
+The Vite dev server runs on `http://localhost:5173/` and proxies `/api` to `http://localhost:8080`.
+
+Production build:
+
 ```powershell
 npm run build
 ```
-Builds verified: clean exit code 0 (`dist/` directory generated).
 
 ---
 
-## Automated Test Suites
+## Test Suites
 
-PerfTrace maintains 36 automated tests across unit and integration suites:
+### Backend unit tests (Surefire)
 
 ```powershell
 cd A:\Project\PerfTrace\backend
-
-# Run Unit Tests (Surefire Plugin: 35 tests)
 .\mvnw.cmd test
+```
 
-# Run Full Verification (Surefire + Failsafe Integration Tests: 36 tests)
+Current verified result (2026-11-02): **75 tests, 0 failures, 0 errors, 0 skipped**.
+
+Coverage includes:
+- detector rules, missing-data semantics, and thermal heuristics
+- streaming window boundaries, gap retention, and active-clock exclusion
+- thermal baseline correction with a majority of throttled windows
+- segment merging and throttle-transition protection
+- CSV header mapping, numeric normalization, midnight rollover, malformed timestamps, and monotonic offsets
+- comparison metrics/warnings and null-percentage handling
+- authentication and duplicate registration handling
+- failed-upload transaction rollback
+
+### Backend verification (Surefire + Failsafe)
+
+```powershell
 .\mvnw.cmd verify
 ```
 
-### Test Breakdown:
-- `DetectorsTest` (15 tests):
-  - `IdleDetector` (3 tests): Idle detection, active workload rejection, null safety.
-  - `CpuBoundDetector` (4 tests): Multi-core saturation, single-thread bottleneck with GPU headroom, GPU-saturated rejection, missing sensor handling.
-  - `GpuBoundDetector` (3 tests): GPU saturation, low GPU load rejection, null sensor safety.
-  - `ThermalThrottleDetector` (5 tests): Explicit hardware flag detection, heuristic clock regression with elevated temp, high temp without clock drop (no false positive), baseline clock drop detection, normal operating temperatures.
-- `CsvIngestionServiceTest` (7 tests): Standard HWiNFO64 header mapping, alternate sensor names, missing columns, comma-in-quotes, numeric formatting, UTF-8 BOM handling, second unit header row skipping.
-- `SegmentMergingServiceTest` (4 tests): Adjacent compatible window merging, boundary preservation on classification change, boundary preservation on throttle transitions (protection rule), empty input.
-- `RunComparisonServiceTest` (4 tests): Metric delta calculations, duration disparity warning (>1.3x), idle ratio mismatch warning (>25%), sensor coverage difference tracking.
-- `AuthControllerTest` (5 tests): User registration, duplicate username rejection, invalid email rejection, login success, invalid password rejection.
-- `AnalysisRunIntegrationTest` (1 comprehensive E2E test): Full multi-user lifecycle test against mock MVC and database: upload -> batch insert -> segment retrieval -> downsampled samples -> user cross-access isolation (HTTP 403) -> side-by-side run comparison -> cascading deletion.
+Current local result (2026-11-02):
+- Surefire: **75 tests passed**
+- Failsafe H2 integration tests: **4 tests passed** (`AnalysisRunIntegrationTest`)
+  - full upload → segments → downsampled samples → compare → delete lifecycle
+  - workload metadata round-trip and UNSPECIFIED default
+  - cross-user denial on every run endpoint
+  - database downsampling preserves a short stress spike
+- Failsafe PostgreSQL Testcontainers test: **2 tests skipped locally** because no Docker daemon is available on this machine
+- Build: `BUILD SUCCESS`
+
+The PostgreSQL suite (`PostgresIntegrationTest`) is intentionally **not** satisfied by H2. It starts a real `postgres:16-alpine` container, applies the real Flyway migrations, and boots Hibernate with `ddl-auto=validate`. It verifies:
+- `V2` is the latest applied migration and `workload_type` is `NOT NULL`
+- user-supplied workload metadata persists and defaults to `UNSPECIFIED`
+- PostgreSQL `NTILE` min/max downsampling preserves a short spike
+
+When Docker is unavailable, `@Testcontainers(disabledWithoutDocker = true)` skips these tests. Skipped is reported as skipped, not as a pass. The GitHub Actions workflow runs them on a Docker-enabled runner.
+
+### Frontend tests
+
+```powershell
+cd A:\Project\PerfTrace\frontend
+npm test
+npm run build
+```
+
+Current verified result: **13 Vitest tests passed** across 2 files, and the production build completed successfully.
 
 ---
 
-## REST API Specification
+## REST API
 
-| Method | Endpoint | Description | Auth Required |
+| Method | Endpoint | Description | Auth |
 |---|---|---|---|
 | `POST` | `/api/auth/register` | Register a new user | No |
-| `POST` | `/api/auth/login` | Authenticate and obtain JWT token | No |
-| `GET` | `/api/auth/me` | Get authenticated user profile | Yes (Bearer) |
-| `POST` | `/api/runs/upload` | Upload and analyze HWiNFO64 CSV file | Yes (Bearer) |
-| `GET` | `/api/runs` | List user's analysis runs (paginated) | Yes (Bearer) |
-| `GET` | `/api/runs/{id}` | Get run summary, active % breakdown | Yes (Bearer) |
-| `GET` | `/api/runs/{id}/segments` | Get detected timeline segments & evidence | Yes (Bearer) |
-| `GET` | `/api/runs/{id}/samples` | Get downsampled points for charts | Yes (Bearer) |
-| `GET` | `/api/runs/compare?a={idA}&b={idB}` | Compare two runs side-by-side | Yes (Bearer) |
-| `DELETE` | `/api/runs/{id}` | Delete a run and associated telemetry | Yes (Bearer) |
+| `POST` | `/api/auth/login` | Authenticate and obtain JWT | No |
+| `GET` | `/api/auth/me` | Get authenticated profile | Yes |
+| `POST` | `/api/runs/upload` | Upload and analyze a CSV (`file`, optional `description`, optional `workloadType`) | Yes |
+| `GET` | `/api/runs` | List the caller's runs (paginated) | Yes |
+| `GET` | `/api/runs/{id}` | Get run summary and percentages | Yes |
+| `GET` | `/api/runs/{id}/segments` | Get timeline segments and evidence | Yes |
+| `GET` | `/api/runs/{id}/samples?maxPoints=500` | Get database-downsampled chart points | Yes |
+| `GET` | `/api/runs/compare?a={runIdA}&b={runIdB}` | Compare two completed runs | Yes |
+| `DELETE` | `/api/runs/{id}` | Delete a run and its telemetry | Yes |
+
+Supported `workloadType` values: `UNSPECIFIED`, `GAMING`, `CPU_RENDER`, `GPU_RENDER`, `STREAMING`, `PRODUCTIVITY`, `SYNTHETIC_BENCHMARK`, `OTHER`.
+
+Cross-user access returns `404 Not Found` rather than `403`, so run IDs cannot be enumerated.
 
 ---
 
-## Known Limitations & Verification Status
+## Verification Status and Limitations
 
-1. **HWiNFO64 Real Export Verification**: The CSV parser and canonical header mappings were built according to standard HWiNFO64 export specifications and verified against synthetic test fixtures (`synthetic_cpu_bound.csv`, `synthetic_gpu_bound.csv`, `synthetic_throttling.csv`). Because real HWiNFO64 exports vary across localized Windows environments, sensor hardware, and HWiNFO versions, **real-file compatibility remains marked as unverified until tested against genuine user hardware exports**.
-2. **Heuristic vs Hardware Ground Truth**: Heuristic thermal throttling detection requires baseline clock estimation; workloads with dynamic P-state scaling (e.g., bursty web browsing) may trigger clock variations that require manual verification against the explicit hardware throttle register flag.
+1. **Real HWiNFO64 exports**: the parser is verified against synthetic fixtures and unit tests. Real exports vary by HWiNFO version, locale, and sensor hardware, so genuine user-file compatibility remains user-verified rather than claimed.
+2. **PostgreSQL compatibility**: the real PostgreSQL Testcontainers test is configured and included in CI, but it was **skipped in this local environment** because Docker was unavailable. H2 results are not presented as PostgreSQL proof.
+3. **Heuristic throttling**: the heuristic is conservative and requires temperature, load, and a clock regression. Dynamic P-state behavior can still require manual confirmation against hardware throttle registers.
+4. **Thermal baseline**: the two-stage P95/P90 method reduces self-masking by long throttled periods, but if more than roughly 95% of active windows are already throttled, the preliminary baseline can still be affected. Results should be interpreted with the emitted warnings.
+5. **Workload detection**: workload type is never inferred automatically. If it is `UNSPECIFIED`, comparison warns that workload equivalence cannot be verified.
+6. **No automatic performance-improvement claims**: PerfTrace reports telemetry shifts and rule-based saturation. Lower temperature alone is never treated as proof of higher performance.

@@ -1,11 +1,13 @@
 package com.perftrace.dto;
 
 import com.perftrace.entity.RunStatus;
+import com.perftrace.entity.WorkloadType;
 
 public class RunUploadResponse {
 
     private Long runId;
     private String fileName;
+    private WorkloadType workloadType;
     private RunStatus status;
     private String message;
     private Integer totalRowsParsed;
@@ -27,6 +29,9 @@ public class RunUploadResponse {
 
     public String getFileName() { return fileName; }
     public void setFileName(String fileName) { this.fileName = fileName; }
+
+    public WorkloadType getWorkloadType() { return workloadType; }
+    public void setWorkloadType(WorkloadType workloadType) { this.workloadType = workloadType; }
 
     public RunStatus getStatus() { return status; }
     public void setStatus(RunStatus status) { this.status = status; }

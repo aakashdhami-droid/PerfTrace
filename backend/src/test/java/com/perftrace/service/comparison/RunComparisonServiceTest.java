@@ -4,6 +4,7 @@ import com.perftrace.dto.RunComparisonDto;
 import com.perftrace.entity.AnalysisRun;
 import com.perftrace.entity.RunStatus;
 import com.perftrace.entity.User;
+import com.perftrace.entity.WorkloadType;
 import com.perftrace.exception.ResourceNotFoundException;
 import com.perftrace.repository.AnalysisRunRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -115,6 +116,54 @@ class RunComparisonServiceTest {
     }
 
     @Test
+    @DisplayName("Should warn when one run has no declared workload type")
+    void testUnspecifiedWorkloadWarning() {
+        runA.setWorkloadType(WorkloadType.GAMING);
+        runB.setWorkloadType(WorkloadType.UNSPECIFIED);
+
+        when(runRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(runA));
+        when(runRepository.findByIdAndUserId(20L, 1L)).thenReturn(Optional.of(runB));
+
+        RunComparisonDto result = comparisonService.compareRuns(10L, 20L, 1L);
+
+        assertThat(result.getComparabilityWarnings())
+            .anyMatch(w -> w.contains("Workload type is unspecified for Run B")
+                && w.contains("does not infer workload type"));
+    }
+
+    @Test
+    @DisplayName("Should warn when the two runs declare different workload types")
+    void testDifferentWorkloadTypeWarning() {
+        runA.setWorkloadType(WorkloadType.GAMING);
+        runB.setWorkloadType(WorkloadType.GPU_RENDER);
+
+        when(runRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(runA));
+        when(runRepository.findByIdAndUserId(20L, 1L)).thenReturn(Optional.of(runB));
+
+        RunComparisonDto result = comparisonService.compareRuns(10L, 20L, 1L);
+
+        assertThat(result.getComparabilityWarnings())
+            .anyMatch(w -> w.contains("Different declared workload types")
+                && w.contains("Run A is GAMING")
+                && w.contains("Run B is GPU_RENDER"));
+    }
+
+    @Test
+    @DisplayName("Should not emit a workload mismatch warning when both runs declare the same type")
+    void testMatchingWorkloadTypeProducesNoWorkloadWarning() {
+        runA.setWorkloadType(WorkloadType.GAMING);
+        runB.setWorkloadType(WorkloadType.GAMING);
+
+        when(runRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(runA));
+        when(runRepository.findByIdAndUserId(20L, 1L)).thenReturn(Optional.of(runB));
+
+        RunComparisonDto result = comparisonService.compareRuns(10L, 20L, 1L);
+
+        assertThat(result.getComparabilityWarnings())
+            .noneMatch(w -> w.contains("workload type") || w.contains("Workload type"));
+    }
+
+    @Test
     @DisplayName("Should warn when run durations differ by more than 30%")
     void testDurationDisparityWarning() {
         runB.setTotalDurationSeconds(700.0); // 700s vs 300s (ratio 2.3x > 1.3x)
@@ -126,5 +175,75 @@ class RunComparisonServiceTest {
 
         assertThat(result.getComparabilityWarnings())
             .anyMatch(w -> w.contains("Run duration disparity"));
+    }
+
+    @Test
+    @DisplayName("Should warn when idle ratios differ by more than 25 percentage points")
+    void testIdleDisparityWarning() {
+        runA.setIdleSeconds(50.0);   // 50 / 300 = 16.7%
+        runB.setIdleSeconds(150.0);  // 150 / 320 = 46.9%
+
+        when(runRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(runA));
+        when(runRepository.findByIdAndUserId(20L, 1L)).thenReturn(Optional.of(runB));
+
+        RunComparisonDto result = comparisonService.compareRuns(10L, 20L, 1L);
+
+        assertThat(result.getComparabilityWarnings())
+            .anyMatch(w -> w.contains("Idle state disparity"));
+    }
+
+    @Test
+    @DisplayName("Should use observed data duration, not raw elapsed duration, for active time")
+    void testActiveDurationUsesObservedData() {
+        runA.setTotalDurationSeconds(1000.0);
+        runA.setValidDataDurationSeconds(300.0);
+        runA.setIdleSeconds(50.0);
+
+        when(runRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(runA));
+        when(runRepository.findByIdAndUserId(20L, 1L)).thenReturn(Optional.of(runB));
+
+        RunComparisonDto result = comparisonService.compareRuns(10L, 20L, 1L);
+
+        var activeMetric = result.getMetrics().stream()
+            .filter(m -> m.getName().equals("Active Workload Duration"))
+            .findFirst()
+            .orElseThrow();
+
+        assertThat(activeMetric.getValueA()).isEqualTo(250.0);
+        assertThat(result.getRunA().getCpuBoundActivePercent()).isEqualTo(60.0); // 150 / 250
+    }
+
+    @Test
+    @DisplayName("Should report N/A percentages instead of 0% when there is no active time")
+    void testNoActiveTimeProducesNullPercentages() {
+        runA.setTotalDurationSeconds(0.0);
+        runA.setValidDataDurationSeconds(0.0);
+        runA.setIdleSeconds(0.0);
+        runA.setCpuBoundSeconds(0.0);
+        runA.setGpuBoundSeconds(0.0);
+        runA.setBalancedSeconds(0.0);
+
+        runB.setTotalDurationSeconds(0.0);
+        runB.setValidDataDurationSeconds(0.0);
+        runB.setIdleSeconds(0.0);
+        runB.setCpuBoundSeconds(0.0);
+        runB.setGpuBoundSeconds(0.0);
+        runB.setBalancedSeconds(0.0);
+
+        when(runRepository.findByIdAndUserId(10L, 1L)).thenReturn(Optional.of(runA));
+        when(runRepository.findByIdAndUserId(20L, 1L)).thenReturn(Optional.of(runB));
+
+        RunComparisonDto result = comparisonService.compareRuns(10L, 20L, 1L);
+
+        var cpuMetric = result.getMetrics().stream()
+            .filter(m -> m.getName().equals("CPU-Bound Active Time"))
+            .findFirst()
+            .orElseThrow();
+
+        assertThat(cpuMetric.getValueA()).isNull();
+        assertThat(cpuMetric.getValueB()).isNull();
+        assertThat(cpuMetric.getDifference()).isNull();
+        assertThat(result.getRunA().getCpuBoundActivePercent()).isNull();
+        assertThat(result.getRunA().getIdleTotalPercent()).isNull();
     }
 }

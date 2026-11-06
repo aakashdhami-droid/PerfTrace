@@ -9,6 +9,11 @@ backend/.mvn/wrapper/maven-wrapper.jar
 backend/*.iml
 backend/.idea/
 
+# Build/test output logs
+mvn_*.txt
+verify_out.txt
+test_out.txt
+
 # Frontend / Node
 frontend/node_modules/
 frontend/dist/

@@ -132,7 +132,7 @@ export const App: React.FC = () => {
                 <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                   Sensor data arrives at sub-second intervals (typically 500ms–2000ms).
                   To eliminate micro-spikes and transient scheduling noise, readings are bucketed into ~10-second non-overlapping windows.
-                  Time gaps exceeding 30s trigger window boundaries to avoid interpolating over system sleep or pauses.
+                  Time gaps exceeding 15s are marked as data gaps and retained as explicit unknown periods rather than interpolated across system sleep or pauses.
                 </p>
               </div>
 
@@ -145,10 +145,11 @@ export const App: React.FC = () => {
                 </div>
                 <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                   Windows are evaluated using transparent rules:
-                  <br />• <strong>CPU-Bound:</strong> CPU load &gt; 80% (or single-core saturation) while GPU &lt; 85%.
-                  <br />• <strong>GPU-Bound:</strong> GPU load &gt; 90%.
-                  <br />• <strong>Idle:</strong> CPU &lt; 20% and GPU &lt; 20%.
-                  <br />• <strong>Balanced:</strong> Workload shared; no single bottleneck threshold triggered.
+                  <br />• <strong>CPU-Bound:</strong> CPU total or busiest thread ≥ 90% while GPU &lt; 90%.
+                  <br />• <strong>GPU-Bound:</strong> GPU load ≥ 95% with busiest CPU thread &lt; 85%.
+                  <br />• <strong>Idle:</strong> CPU total &lt; 15% and GPU load &lt; 15%.
+                  <br />• <strong>Balanced:</strong> Active workload, but no bottleneck rule fired and busiest-thread data exists.
+                  <br />• <strong>Unknown:</strong> Missing load/thread evidence — never guessed as Balanced.
                 </p>
               </div>
 
@@ -161,8 +162,9 @@ export const App: React.FC = () => {
                 </div>
                 <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                   PerfTrace differentiates between <em>explicit hardware thermal throttle flags</em> (PROCHOT / register flag in HWiNFO)
-                  and <em>heuristic throttling</em> (sustained &gt;88°C, heavy load, and a &gt;12% clock frequency regression from baseline).
-                  High temperature alone never triggers a throttling verdict.
+                  and <em>heuristic throttling</em> (CPU ≥ 90°C or GPU ≥ 83°C, load ≥ 50%, and a &gt;12% clock
+                  regression below the 90th-percentile non-idle baseline). High temperature alone never triggers a
+                  throttling verdict.
                 </p>
               </div>
 
@@ -187,8 +189,8 @@ export const App: React.FC = () => {
                   <h3 style={{ fontSize: '1.125rem', fontWeight: 600 }}>6. Production Enterprise Architecture</h3>
                 </div>
                 <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                  Built with Spring Boot 4.1, Spring Security 7 stateless JWT filters, PostgreSQL 16 with indexed foreign keys and JSONB metadata,
-                  Flyway schema migrations, and batch JDBC insertions for streaming scalability.
+                  Built with Spring Boot 4.1, Spring Security 7 stateless JWT authentication, PostgreSQL 16 with indexed
+                  foreign keys, Flyway schema migrations, and batched JDBC inserts for streaming scalability.
                 </p>
               </div>
             </div>

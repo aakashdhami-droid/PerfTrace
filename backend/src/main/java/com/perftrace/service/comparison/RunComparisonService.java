@@ -5,6 +5,7 @@ import com.perftrace.dto.MetricComparisonDto;
 import com.perftrace.dto.RunComparisonDto;
 import com.perftrace.entity.AnalysisRun;
 import com.perftrace.entity.RunStatus;
+import com.perftrace.entity.WorkloadType;
 import com.perftrace.exception.InvalidFileException;
 import com.perftrace.exception.ResourceNotFoundException;
 import com.perftrace.repository.AnalysisRunRepository;
@@ -81,45 +82,36 @@ public class RunComparisonService {
         m.add(new MetricComparisonDto(
             "Active Workload Duration", "Duration", "seconds",
             activeA, activeB,
-            "Total duration minus idle time. Used as denominator for active classification percentages."
+            "Observed telemetry duration minus idle time. Used as the denominator for active classification percentages."
         ));
 
-        // CPU-bound
-        double cpuPctA = activeA > 0 ? Math.min(100.0, getOrZero(a.getCpuBoundSeconds()) / activeA * 100.0) : 0.0;
-        double cpuPctB = activeB > 0 ? Math.min(100.0, getOrZero(b.getCpuBoundSeconds()) / activeB * 100.0) : 0.0;
+        // Classification percentages. With no active time there is no meaningful percentage,
+        // so null is reported instead of a misleading 0%.
         m.add(new MetricComparisonDto(
             "CPU-Bound Active Time", "Classification", "% of active time",
-            round(cpuPctA), round(cpuPctB),
+            percentOf(a.getCpuBoundSeconds(), activeA), percentOf(b.getCpuBoundSeconds(), activeB),
             "Portion of active workload where GPU had headroom and CPU was heavily loaded."
         ));
 
-        // GPU-bound
-        double gpuPctA = activeA > 0 ? Math.min(100.0, getOrZero(a.getGpuBoundSeconds()) / activeA * 100.0) : 0.0;
-        double gpuPctB = activeB > 0 ? Math.min(100.0, getOrZero(b.getGpuBoundSeconds()) / activeB * 100.0) : 0.0;
         m.add(new MetricComparisonDto(
             "GPU-Bound Active Time", "Classification", "% of active time",
-            round(gpuPctA), round(gpuPctB),
-            "Portion of active workload where GPU utilization was >= 95%."
+            percentOf(a.getGpuBoundSeconds(), activeA), percentOf(b.getGpuBoundSeconds(), activeB),
+            "Portion of active workload where GPU utilization was >= 95% with CPU thread headroom."
         ));
 
-        // Balanced/Other
-        double balPctA = activeA > 0 ? Math.min(100.0, getOrZero(a.getBalancedSeconds()) / activeA * 100.0) : 0.0;
-        double balPctB = activeB > 0 ? Math.min(100.0, getOrZero(b.getBalancedSeconds()) / activeB * 100.0) : 0.0;
         m.add(new MetricComparisonDto(
             "Balanced / Other Active Time", "Classification", "% of active time",
-            round(balPctA), round(balPctB),
+            percentOf(a.getBalancedSeconds(), activeA), percentOf(b.getBalancedSeconds(), activeB),
             "Portion of active workload where neither CPU nor GPU crossed limitation heuristics."
         ));
 
-        // Idle Time (% of total run)
-        double baseTotalA = Math.max(getOrZero(a.getValidDataDurationSeconds()), getOrZero(a.getTotalDurationSeconds()));
-        double baseTotalB = Math.max(getOrZero(b.getValidDataDurationSeconds()), getOrZero(b.getTotalDurationSeconds()));
-        double idlePctA = baseTotalA > 0 ? Math.min(100.0, getOrZero(a.getIdleSeconds()) / baseTotalA * 100.0) : 0.0;
-        double idlePctB = baseTotalB > 0 ? Math.min(100.0, getOrZero(b.getIdleSeconds()) / baseTotalB * 100.0) : 0.0;
+        // Idle Time (% of observed run data)
+        double baseTotalA = observedDuration(a);
+        double baseTotalB = observedDuration(b);
         m.add(new MetricComparisonDto(
-            "Idle Time", "Activity", "% of total run",
-            round(idlePctA), round(idlePctB),
-            "Percentage of total session spent below 15% CPU and GPU load."
+            "Idle Time", "Activity", "% of observed data",
+            percentOf(a.getIdleSeconds(), baseTotalA), percentOf(b.getIdleSeconds(), baseTotalB),
+            "Percentage of observed telemetry spent below 15% CPU and GPU load."
         ));
 
         // Throttle Duration
@@ -175,6 +167,29 @@ public class RunComparisonService {
     private void buildComparabilityWarnings(RunComparisonDto comparison, AnalysisRun a, AnalysisRun b) {
         List<String> w = comparison.getComparabilityWarnings();
 
+        // 0. Workload metadata. PerfTrace never guesses the workload type; if the user did
+        // not declare it, the comparison cannot verify that the runs represent the same work.
+        WorkloadType workloadA = a.getWorkloadType() != null ? a.getWorkloadType() : WorkloadType.UNSPECIFIED;
+        WorkloadType workloadB = b.getWorkloadType() != null ? b.getWorkloadType() : WorkloadType.UNSPECIFIED;
+        if (workloadA != workloadB) {
+            if (workloadA == WorkloadType.UNSPECIFIED || workloadB == WorkloadType.UNSPECIFIED) {
+                w.add(String.format(
+                    "Workload type is unspecified for %s. PerfTrace does not infer workload type from telemetry; " +
+                    "declare it at upload time to make this comparison reproducible.",
+                    workloadA == WorkloadType.UNSPECIFIED ? "Run A" : "Run B"
+                ));
+            } else {
+                w.add(String.format(
+                    "Different declared workload types: Run A is %s and Run B is %s. " +
+                    "Telemetry shifts between different workload categories may not be comparable.",
+                    workloadA, workloadB
+                ));
+            }
+        } else if (workloadA == WorkloadType.UNSPECIFIED) {
+            w.add("Workload type was not specified for either run. This comparison cannot verify workload equivalence; " +
+                "use the workload selector on upload to make future comparisons reproducible.");
+        }
+
         Double durA = a.getTotalDurationSeconds();
         Double durB = b.getTotalDurationSeconds();
 
@@ -193,9 +208,11 @@ public class RunComparisonService {
         // 2. Idle disparity warning
         Double idleA = a.getIdleSeconds();
         Double idleB = b.getIdleSeconds();
-        if (idleA != null && idleB != null && durA != null && durB != null) {
-            double idleRatioA = idleA / durA;
-            double idleRatioB = idleB / durB;
+        double baseA = observedDuration(a);
+        double baseB = observedDuration(b);
+        if (idleA != null && idleB != null && baseA > 0 && baseB > 0) {
+            double idleRatioA = clampFraction(idleA / baseA);
+            double idleRatioB = clampFraction(idleB / baseB);
             if (Math.abs(idleRatioA - idleRatioB) > 0.25) {
                 w.add(String.format(
                     "Idle state disparity: Run A spent %.1f%% idle while Run B spent %.1f%% idle. " +
@@ -213,11 +230,28 @@ public class RunComparisonService {
     }
 
     private double computeActiveTime(AnalysisRun r) {
-        double validData = getOrZero(r.getValidDataDurationSeconds());
-        double total = getOrZero(r.getTotalDurationSeconds());
-        double base = validData > 0 ? validData : total;
         double idle = getOrZero(r.getIdleSeconds());
-        return Math.max(0.0, base - idle);
+        return Math.max(0.0, observedDuration(r) - idle);
+    }
+
+    /**
+     * Duration covered by windows that actually contained telemetry. Falls back to the raw
+     * elapsed duration for older rows that predate valid-data tracking. Empty gap windows
+     * are deliberately excluded so sampling outages are not mislabelled as idle time.
+     */
+    private double observedDuration(AnalysisRun r) {
+        double validData = getOrZero(r.getValidDataDurationSeconds());
+        return validData > 0 ? validData : getOrZero(r.getTotalDurationSeconds());
+    }
+
+    private Double percentOf(Double numerator, double denominator) {
+        if (denominator <= 0) return null;
+        return round(Math.min(100.0, getOrZero(numerator) / denominator * 100.0));
+    }
+
+    private double clampFraction(double value) {
+        if (!Double.isFinite(value)) return 0.0;
+        return Math.min(1.0, Math.max(0.0, value));
     }
 
     private double getOrZero(Double v) {
@@ -244,6 +278,7 @@ public class RunComparisonService {
         dto.setId(run.getId());
         dto.setFileName(run.getFileName());
         dto.setDescription(run.getDescription());
+        dto.setWorkloadType(run.getWorkloadType());
         dto.setStatus(run.getStatus());
         dto.setErrorMessage(run.getErrorMessage());
         dto.setTotalDurationSeconds(run.getTotalDurationSeconds());
@@ -255,17 +290,13 @@ public class RunComparisonService {
         dto.setUnknownSeconds(run.getUnknownSeconds());
 
         double active = computeActiveTime(run);
-        if (active > 0) {
-            dto.setCpuBoundActivePercent(round(Math.min(100.0, getOrZero(run.getCpuBoundSeconds()) / active * 100.0)));
-            dto.setGpuBoundActivePercent(round(Math.min(100.0, getOrZero(run.getGpuBoundSeconds()) / active * 100.0)));
-            dto.setBalancedActivePercent(round(Math.min(100.0, getOrZero(run.getBalancedSeconds()) / active * 100.0)));
-        }
+        dto.setCpuBoundActivePercent(percentOf(run.getCpuBoundSeconds(), active));
+        dto.setGpuBoundActivePercent(percentOf(run.getGpuBoundSeconds(), active));
+        dto.setBalancedActivePercent(percentOf(run.getBalancedSeconds(), active));
 
-        double baseTotal = Math.max(getOrZero(run.getValidDataDurationSeconds()), getOrZero(run.getTotalDurationSeconds()));
-        if (baseTotal > 0) {
-            dto.setIdleTotalPercent(round(Math.min(100.0, getOrZero(run.getIdleSeconds()) / baseTotal * 100.0)));
-            dto.setThrottlePercent(round(Math.min(100.0, getOrZero(run.getThrottleDurationSeconds()) / baseTotal * 100.0)));
-        }
+        double baseTotal = observedDuration(run);
+        dto.setIdleTotalPercent(percentOf(run.getIdleSeconds(), baseTotal));
+        dto.setThrottlePercent(percentOf(run.getThrottleDurationSeconds(), baseTotal));
 
         dto.setThrottleDurationSeconds(run.getThrottleDurationSeconds());
         dto.setHardwareFlagThrottleSeconds(run.getHardwareFlagThrottleSeconds());

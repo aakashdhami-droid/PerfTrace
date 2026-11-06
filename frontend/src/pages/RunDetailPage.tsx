@@ -78,14 +78,17 @@ export const RunDetailPage: React.FC<Props> = ({ runId, onBack, onCompare }) => 
   }
 
   const formatSeconds = (sec?: number) => {
-    if (sec == null) return '0s';
-    const m = Math.floor(sec / 60);
-    const s = Math.round(sec % 60);
+    if (sec == null || !Number.isFinite(sec)) return 'N/A';
+    const total = Math.max(0, Math.round(sec));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
     if (m === 0) return `${s}s`;
     return `${m}m ${s}s`;
   };
 
-  const activeDuration = Math.max(0, (run.totalDurationSeconds || 0) - (run.idleSeconds || 0));
+  // Use the observed-data duration so sampling gaps are not mislabelled as active time.
+  const observedDuration = run.validDataDurationSeconds ?? run.totalDurationSeconds ?? 0;
+  const activeDuration = Math.max(0, observedDuration - (run.idleSeconds ?? 0));
 
   return (
     <div style={{ maxWidth: '1380px', margin: '0 auto', padding: '32px 24px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -155,7 +158,7 @@ export const RunDetailPage: React.FC<Props> = ({ runId, onBack, onCompare }) => 
 
         <MetricCard
           title="CPU-Limited Active Time"
-          value={run.cpuBoundActivePercent != null ? `${run.cpuBoundActivePercent}%` : '0%'}
+          value={run.cpuBoundActivePercent != null ? `${run.cpuBoundActivePercent}%` : 'N/A'}
           subtitle={`${formatSeconds(run.cpuBoundSeconds)} of active workload`}
           icon={<Cpu size={18} />}
           highlight="blue"
@@ -163,7 +166,7 @@ export const RunDetailPage: React.FC<Props> = ({ runId, onBack, onCompare }) => 
 
         <MetricCard
           title="GPU-Limited Active Time"
-          value={run.gpuBoundActivePercent != null ? `${run.gpuBoundActivePercent}%` : '0%'}
+          value={run.gpuBoundActivePercent != null ? `${run.gpuBoundActivePercent}%` : 'N/A'}
           subtitle={`${formatSeconds(run.gpuBoundSeconds)} of active workload`}
           icon={<Zap size={18} />}
           highlight="emerald"
@@ -171,16 +174,16 @@ export const RunDetailPage: React.FC<Props> = ({ runId, onBack, onCompare }) => 
 
         <MetricCard
           title="Balanced / Other"
-          value={run.balancedActivePercent != null ? `${run.balancedActivePercent}%` : '0%'}
+          value={run.balancedActivePercent != null ? `${run.balancedActivePercent}%` : 'N/A'}
           subtitle={`${formatSeconds(run.balancedSeconds)} active time`}
           icon={<Scale size={18} />}
           highlight="neutral"
         />
 
         <MetricCard
-          title="Idle Time (% of total)"
-          value={run.idleTotalPercent != null ? `${run.idleTotalPercent}%` : '0%'}
-          subtitle={`${formatSeconds(run.idleSeconds)} below 15% load`}
+          title="Idle Time (% of observed)"
+          value={run.idleTotalPercent != null ? `${run.idleTotalPercent}%` : 'N/A'}
+          subtitle={`${formatSeconds(run.idleSeconds)} below 15% CPU/GPU load`}
           icon={<Moon size={18} />}
           highlight="neutral"
         />
@@ -195,18 +198,18 @@ export const RunDetailPage: React.FC<Props> = ({ runId, onBack, onCompare }) => 
 
         <MetricCard
           title="Peak Temperatures"
-          value={run.peakCpuTempC ? `${run.peakCpuTempC}°C` : 'N/A'}
+          value={run.peakCpuTempC != null ? `${run.peakCpuTempC}°C` : 'N/A'}
           unit="CPU"
-          subtitle={`GPU Peak: ${run.peakGpuTempC ? `${run.peakGpuTempC}°C` : 'N/A'}`}
+          subtitle={`GPU Peak: ${run.peakGpuTempC != null ? `${run.peakGpuTempC}°C` : 'N/A'}`}
           icon={<Thermometer size={18} />}
-          highlight={run.peakCpuTempC && run.peakCpuTempC >= 90 ? 'rose' : 'neutral'}
+          highlight={run.peakCpuTempC != null && run.peakCpuTempC >= 90 ? 'rose' : 'neutral'}
         />
 
         <MetricCard
           title="Avg Sustained Clock"
-          value={run.avgCpuClockMhz ? `${Math.round(run.avgCpuClockMhz)}` : 'N/A'}
+          value={run.avgCpuClockMhz != null ? `${Math.round(run.avgCpuClockMhz)}` : 'N/A'}
           unit="MHz CPU"
-          subtitle={`GPU Sustained: ${run.avgGpuClockMhz ? `${Math.round(run.avgGpuClockMhz)} MHz` : 'N/A'}`}
+          subtitle={`GPU Sustained: ${run.avgGpuClockMhz != null ? `${Math.round(run.avgGpuClockMhz)} MHz` : 'N/A'}`}
           icon={<Gauge size={18} />}
           highlight="blue"
         />

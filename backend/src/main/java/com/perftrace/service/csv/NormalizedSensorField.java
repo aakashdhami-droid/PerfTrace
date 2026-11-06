@@ -2,6 +2,7 @@ package com.perftrace.service.csv;
 
 public enum NormalizedSensorField {
     TIMESTAMP("Timestamp / Time"),
+    DATE("Date"),
     CPU_TOTAL_LOAD("CPU Total Load (%)"),
     CPU_MAX_THREAD_LOAD("CPU Max Thread Load (%)"),
     CPU_TEMP("CPU Temperature (°C)"),

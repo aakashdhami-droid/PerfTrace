@@ -4,6 +4,36 @@ export type ThrottleEvidence = 'NONE' | 'HARDWARE_FLAG' | 'HEURISTIC_DETECTED' |
 
 export type RunStatus = 'UPLOADING' | 'ANALYZING' | 'COMPLETED' | 'FAILED';
 
+/**
+ * User-supplied workload category. PerfTrace never infers this from telemetry;
+ * UNSPECIFIED means the user did not declare it and comparisons warn accordingly.
+ */
+export type WorkloadType =
+  | 'UNSPECIFIED'
+  | 'GAMING'
+  | 'CPU_RENDER'
+  | 'GPU_RENDER'
+  | 'STREAMING'
+  | 'PRODUCTIVITY'
+  | 'SYNTHETIC_BENCHMARK'
+  | 'OTHER';
+
+export const WORKLOAD_TYPE_OPTIONS: ReadonlyArray<{ value: WorkloadType; label: string }> = [
+  { value: 'UNSPECIFIED', label: 'Not specified' },
+  { value: 'GAMING', label: 'Gaming' },
+  { value: 'CPU_RENDER', label: 'CPU render / compile' },
+  { value: 'GPU_RENDER', label: 'GPU render' },
+  { value: 'STREAMING', label: 'Streaming' },
+  { value: 'PRODUCTIVITY', label: 'Productivity' },
+  { value: 'SYNTHETIC_BENCHMARK', label: 'Synthetic benchmark' },
+  { value: 'OTHER', label: 'Other' },
+];
+
+export function formatWorkloadType(value?: WorkloadType | null): string {
+  if (!value) return 'Not specified';
+  return WORKLOAD_TYPE_OPTIONS.find((option) => option.value === value)?.label ?? value;
+}
+
 export interface User {
   id: number;
   username: string;
@@ -23,6 +53,7 @@ export interface AnalysisRun {
   id: number;
   fileName: string;
   description?: string;
+  workloadType?: WorkloadType;
   status: RunStatus;
   errorMessage?: string;
   totalDurationSeconds?: number;
@@ -121,6 +152,7 @@ export interface RunComparison {
 export interface UploadResponse {
   runId: number;
   fileName: string;
+  workloadType?: WorkloadType;
   status: RunStatus;
   message: string;
   totalRowsParsed?: number;

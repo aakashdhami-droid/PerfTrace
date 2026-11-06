@@ -30,6 +30,11 @@ public class AnalysisRun {
     @Column(name = "description", length = 500)
     private String description;
 
+    /** User-supplied workload category; never inferred automatically. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "workload_type", nullable = false, length = 30)
+    private WorkloadType workloadType = WorkloadType.UNSPECIFIED;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false, length = 20)
     private RunStatus status = RunStatus.UPLOADING;
@@ -136,6 +141,9 @@ public class AnalysisRun {
 
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
+
+    public WorkloadType getWorkloadType() { return workloadType; }
+    public void setWorkloadType(WorkloadType workloadType) { this.workloadType = workloadType; }
 
     public RunStatus getStatus() { return status; }
     public void setStatus(RunStatus status) { this.status = status; }
